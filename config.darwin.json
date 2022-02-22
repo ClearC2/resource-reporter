@@ -1,0 +1,21 @@
+{
+    "slack": "https://hooks.slack.com/services/:token1/:token2",
+    "token": "secret-token123",
+    "alerts": {
+        "RAM Used": [
+           {"title": "Hostname", "command": "hostname"},
+           {"title": "ps - Ordered by MEM", "command": "ps axm -o pid,ruser=USER,%cpu=%CPU,%mem=%MEM,command | head -n 6"}
+        ],
+        "CPU Used": [
+            {"title": "Hostname", "command": "hostname"},
+            {"title": "ps - Ordered by CPU", "command": "ps axr -o pid,ruser=USER,%cpu=%CPU,%mem=%MEM,command | head -n 6"}
+        ],
+        "Disk Space": [
+            {"title": "Hostname", "command": "hostname"},
+            {"title": "Disk Space", "command": "df -h"}
+        ]
+    },
+    "hosts": {
+        "somehostname": "100.200.300.400"
+    }
+}

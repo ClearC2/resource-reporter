@@ -1,0 +1,7 @@
+.DS_Store
+.idea
+.code
+resource-reporter.linux-amd64
+config.local.json
+config.deploy.json
+scratch.sh

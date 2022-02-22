@@ -1,0 +1,32 @@
+{
+    "receiver": "webhook",
+    "status": "firing",
+    "alerts": [
+      {
+        "status": "firing",
+        "labels": {
+          "alertname": "Disk Space",
+          "instance": "localhost:9100",
+          "job": "node_exporter"
+        },
+        "annotations": {
+          "description": "localhost:9100 using \u003e 75% RAM for longer than 10 minutes",
+          "summary": "localhost:9100 using \u003e 75% RAM"
+        },
+        "startsAt": "2022-02-22T15:22:31.715Z",
+        "endsAt": "0001-01-01T00:00:00Z",
+        "generatorURL": "http://website.com:9090/graph?g0.expr=%28100+-+%28%28%28node_memory_MemAvailable_bytes%7Bjob%3D%22node_exporter%22%7D%29+%2A+100%29+%2F+%28node_memory_MemTotal_bytes%7Bjob%3D%22node_exporter%22%7D%29%29%29+%3E+5\u0026g0.tab=1",
+        "fingerprint": "cf5469bd3fd8a7ea"
+      }
+    ],
+    "groupLabels": {},
+    "commonLabels": {
+      "alertname": "RAM Used",
+      "job": "node_exporter"
+    },
+    "commonAnnotations": {},
+    "externalURL": "http://website.com:9093",
+    "version": "4",
+    "groupKey": "{}/{}:{}",
+    "truncatedAlerts": 0
+  }
