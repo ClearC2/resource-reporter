@@ -36,7 +36,7 @@ Create a service file on the target server to run the application:
 Description=Go resource reporter for AlertManager + Slack
 After=network-online.target
 [Service]
-User=root
+User=prometheus
 Restart=on-failure
 ExecStart=/srv/utils/resource-reporter.linux-amd64 /srv/utils/resource-reporter.config.json
 [Install]
