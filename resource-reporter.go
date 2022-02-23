@@ -83,7 +83,7 @@ func getHost(host string) string {
 	if configHost != "" {
 		return configHost
 	}
-	// otherwise get the host parsing host value
+	// otherwise get the host form parsing the "instance" value from the alert
 	return strings.Split(host, ":")[0]
 }
 

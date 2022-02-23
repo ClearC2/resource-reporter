@@ -9,7 +9,7 @@
         ],
         "CPU Used": [
             {"title": "Hostname", "command": "hostname"},
-            {"title": "ps - Ordered by MEM", "command": "ps axr -o pid,ruser=USER,%cpu=%CPU,%mem=%MEM,command | head -n 6"}
+            {"title": "ps - Ordered by CPU", "command": "ps ax --sort=-%cpu -o pid,ruser=USER,%cpu=%CPU,%mem=%MEM,command | head -n 6"}
         ],
         "Disk Space": [
             {"title": "Hostname", "command": "hostname"},
