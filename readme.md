@@ -17,9 +17,10 @@ The `token` in the config file is an authentication token. It needs to be the sa
 Copy the`config.linux.json` file to `config.deploy.json` and fill in the slack webhook and app token. 
 
 ```bash
-# clone the repo then...
+# download the prebuilt executable
+wget https://github.com/ClearC2/resource-reporter/releases/download/v1.0.0/resource-reporter.linux-amd64 
 
-# build
+# or clone the repo and build yourself
 GOOS=linux GOARCH=amd64 go build -o resource-reporter.linux-amd64 resource-reporter.go
 
 # deploy
