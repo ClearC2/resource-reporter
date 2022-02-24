@@ -79,21 +79,21 @@ func getConfig() (*Config, error) {
 	return &config, nil
 }
 
-func getHost(host string) string {
+func getAlertHost(alert Alert) string {
 	config, _ := getConfig()
-	// try to get host from config
-	configHost := config.Hosts[host]
+	// the config can contain a "hosts" object to map friendly server names to resolvable hostnames
+	configHost := config.Hosts[alert.Labels.Instance]
 	if configHost != "" {
 		return configHost
 	}
 	// otherwise get the host form parsing the "instance" value from the alert
-	return strings.Split(host, ":")[0]
+	return strings.Split(alert.Labels.Instance, ":")[0]
 }
 
 func processAlert(wg *sync.WaitGroup, alert Alert) {
 	defer wg.Done()
 	config, _ := getConfig()
-	host := getHost(alert.Labels.Instance)
+	host := getAlertHost(alert)
 	if host == "" {
 		fmt.Printf("Irrelevant alert: %s %s", host, alert.Labels.Alertname)
 		return
@@ -159,25 +159,6 @@ func validateToken(w http.ResponseWriter, r *http.Request) bool {
 	return true
 }
 
-func runCommandsAndRespond(w http.ResponseWriter, sections []*CommandSection) {
-	for _, commandSection := range sections {
-		out, err := exec.Command("bash", "-c", commandSection.Command).Output()
-		if err != nil {
-			commandSection.Output = err.Error()
-		} else {
-			commandSection.Output = strings.TrimSpace(string(out))
-		}
-	}
-
-	jsonResponse := CommandSectionsJSON{Commands: sections}
-	jsonResp, err := json.Marshal(jsonResponse)
-	if err != nil {
-		writeError(w, "Could not encode command output")
-	} else {
-		writeJson(w, jsonResp)
-	}
-}
-
 func writeJson(w http.ResponseWriter, payload []byte) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Write(payload)
@@ -212,7 +193,25 @@ func main() {
 		} else {
 			commands = []*CommandSection{}
 		}
-		runCommandsAndRespond(w, commands)
+
+		// run commands
+		for _, commandSection := range commands {
+			out, err := exec.Command("bash", "-c", commandSection.Command).Output()
+			if err != nil {
+				commandSection.Output = err.Error()
+			} else {
+				commandSection.Output = strings.TrimSpace(string(out))
+			}
+		}
+
+		// respond with command results
+		jsonResponse := CommandSectionsJSON{Commands: commands}
+		jsonResp, err := json.Marshal(jsonResponse)
+		if err != nil {
+			writeError(w, "Could not encode command output")
+		} else {
+			writeJson(w, jsonResp)
+		}
 	})
 
 	http.HandleFunc("/webhook", func(w http.ResponseWriter, r *http.Request) {
