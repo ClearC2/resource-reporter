@@ -120,19 +120,15 @@ After installing on all target servers we need to configure AlertManager to use 
 
 ```yaml
 route:
-  receiver: <default-receiver>
-  repeat_interval: 1h
-  group_by: []
+  # default route config...
   routes:
-    - receiver: <default-receiver>
-      match:
-      repeat_interval: 30m
-      continue: true
+    # other routes...
     - receiver: resource-reporter
       match:
       repeat_interval: 30m
       continue: true
 receivers:
+  # other receivers...
   - name: resource-reporter
     webhook_configs:
     - url: http://localhost:5050/webhook?token=secrettoken123
