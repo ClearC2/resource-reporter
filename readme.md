@@ -123,11 +123,6 @@ route:
   receiver: resource-reporter
   repeat_interval: 1h
   group_by: []
-  routes:
-    - receiver: webhook
-      match:
-      repeat_interval: 30m
-      continue: true
 receivers:
   - name: resource-reporter
     webhook_configs:
