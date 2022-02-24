@@ -27,9 +27,6 @@ The application needs a config file to run. The config file specifies alert name
             {"title": "Hostname", "command": "hostname"},
             {"title": "Disk Space", "command": "df -h"}
         ]
-    },
-    "hosts": {
-        "somehostname": "100.200.300.400"
     }
 }
 ```
