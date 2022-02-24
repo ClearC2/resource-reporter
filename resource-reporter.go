@@ -10,22 +10,25 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 )
 
-type WebhookPayload struct {
+type Alert struct {
 	Status string `json:"status"`
-	Alerts []struct {
-		Status string `json:"status"`
-		Labels struct {
-			Alertname string `json:"alertname"`
-			Instance  string `json:"instance"`
-		} `json:"labels"`
-		Annotations struct {
-			Description string `json:"description"`
-		} `json:"annotations"`
-		StartsAt string `json:"startsAt"`
-	} `json:"alerts"`
-	ExternalURL string `json:"externalURL"`
+	Labels struct {
+		Alertname string `json:"alertname"`
+		Instance  string `json:"instance"`
+	} `json:"labels"`
+	Annotations struct {
+		Description string `json:"description"`
+	} `json:"annotations"`
+	StartsAt string `json:"startsAt"`
+}
+
+type WebhookPayload struct {
+	Status      string  `json:"status"`
+	Alerts      []Alert `json:"alerts"`
+	ExternalURL string  `json:"externalURL"`
 }
 
 type CommandSection struct {
@@ -87,16 +90,17 @@ func getHost(host string) string {
 	return strings.Split(host, ":")[0]
 }
 
-func processAlert(instance string, alertName string, description string) {
+func processAlert(wg *sync.WaitGroup, alert Alert) {
+	defer wg.Done()
 	config, _ := getConfig()
-	host := getHost(instance)
+	host := getHost(alert.Labels.Instance)
 	if host == "" {
-		fmt.Printf("Irrelevant alert: %s %s", host, alertName)
+		fmt.Printf("Irrelevant alert: %s %s", host, alert.Labels.Alertname)
 		return
 	}
 	params := url.Values{}
 	params.Add("token", config.Token)
-	params.Add("alertName", alertName)
+	params.Add("alertName", alert.Labels.Alertname)
 	webhookUrl := fmt.Sprintf("http://%s:5050/report?%s", host, params.Encode())
 	res, err := http.Get(webhookUrl)
 	if err != nil {
@@ -115,7 +119,7 @@ func processAlert(instance string, alertName string, description string) {
 		Type: "header",
 		Text: SlackText{
 			Type: "plain_text",
-			Text: description,
+			Text: alert.Annotations.Description,
 		},
 	}}
 	for _, command := range payload.Commands {
@@ -223,9 +227,12 @@ func main() {
 			writeError(w, "Could now parse payload")
 			return
 		}
+		var wg sync.WaitGroup
+		defer wg.Wait()
 		for _, alert := range payload.Alerts {
 			if alert.Status == "firing" {
-				processAlert(alert.Labels.Instance, alert.Labels.Alertname, alert.Annotations.Description)
+				wg.Add(1)
+				go processAlert(&wg, alert)
 			}
 		}
 	})
