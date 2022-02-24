@@ -119,31 +119,19 @@ The resource-reporter will be running on port 5050.
 After installing on all target servers we need to configure AlertManager to use it as a webhook.
 
 ```yaml
-global:
-  # other settings
-  slack_api_url: <slack-url>
-
 route:
-  receiver: slack
+  receiver: resource-reporter
   repeat_interval: 1h
   group_by: []
   routes:
-    - receiver: slack
-      match:
-      repeat_interval: 30m
-      continue: true
     - receiver: webhook
       match:
       repeat_interval: 30m
       continue: true
 receivers:
-  - name: webhook
+  - name: resource-reporter
     webhook_configs:
     - url: http://localhost:5050/webhook?token=secrettoken123
-  - name: slack
-    slack_configs:
-    - channel: '#devops-alerts'
-      send_resolved: true
 ```
 Restart AlertManager:
 ```bash
