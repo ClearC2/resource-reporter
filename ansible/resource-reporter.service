@@ -1,0 +1,9 @@
+[Unit]
+Description=Go resource reporter for AlertManager + Slack
+After=network-online.target
+[Service]
+User=prometheus
+Restart=on-failure
+ExecStart=/home/prometheus/resource-reporter.linux-amd64 /home/prometheus/resource-reporter.config.json
+[Install]
+WantedBy=multi-user.target

@@ -5,3 +5,5 @@ resource-reporter.linux-amd64
 config.local.json
 config.deploy.json
 scratch.sh
+ansible/hosts
+ansible/config.deploy.json

@@ -14,18 +14,38 @@ When an alert is triggered, AlertManager will send a POST request to the resourc
 The `token` in the config file is an authentication token. It needs to be the same across all server installs. AlertManager is configured to use it when making a request to the webhook with the alerts payload. The webhook also uses it in requests to other resource-reporters `/report` endpoint to authenticate.
 
 ## Installation
+There are two ways to install the resource-reporter.
+
+### Ansible installation
+Copy the `config.linux.json` to `ansible/config.deploy.json` and fill out the slack endpoint and token.
+
+Next, create a `ansible/hosts` file that contains a line for every server you would like to deploy to with your ssh username:
+```
+[servers]
+192.168.100.52 ansible_user=johndoe
+192.168.100.53 ansible_user=johndoe
+192.168.100.54 ansible_user=johndoe
+```
+
+Finally deploy to all servers:
+```bash
+cd ansible
+ansible-playbook -i ./hosts playbook.yml
+```
+
+### Manual installation
 Copy the`config.linux.json` file to `config.deploy.json` and fill in the slack webhook and app token. 
 
 ```bash
 # download the prebuilt executable
-wget https://github.com/ClearC2/resource-reporter/releases/download/v1.0.0/resource-reporter.linux-amd64 
+wget https://github.com/ClearC2/resource-reporter/releases/download/<release-tag>/resource-reporter.linux-amd64 
 
 # or clone the repo and build yourself
 GOOS=linux GOARCH=amd64 go build -o resource-reporter.linux-amd64 resource-reporter.go
 
 # deploy
-scp ./resource-reporter.linux-amd64 user@server:/srv/utils/
-scp ./config.deploy.json user@server:/srv/utils/resource-reporter.config.json
+scp ./resource-reporter.linux-amd64 user@server:/home/prometheus/
+scp ./config.deploy.json user@server:/home/prometheus/resource-reporter.config.json
 ```
 
 Create a service file on the target server to run the application:
@@ -38,7 +58,7 @@ After=network-online.target
 [Service]
 User=prometheus
 Restart=on-failure
-ExecStart=/srv/utils/resource-reporter.linux-amd64 /srv/utils/resource-reporter.config.json
+ExecStart=/home/prometheus/resource-reporter.linux-amd64 /home/prometheus/resource-reporter.config.json
 [Install]
 WantedBy=multi-user.target
 ```
@@ -47,6 +67,7 @@ Enable and start the service:
 systemctl enable resource-reporter.service
 service resource-reporter start
 ```
+
 The resource-reporter will be running on port 5050.
 
 After installing on all target servers we need to configure AlertManager to use it as a webhook.

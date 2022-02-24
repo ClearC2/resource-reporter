@@ -1,0 +1,54 @@
+---
+- hosts: all
+  become: true
+  become_user: root
+  tasks:
+    - name: create prometheus user
+      ansible.builtin.user:
+        name: prometheus
+    - name: get resource-reporter
+      get_url:
+        url: https://github.com/ClearC2/resource-reporter/releases/download/v1.1.0/resource-reporter.linux-amd64
+        dest: /home/prometheus/resource-reporter.linux-amd64
+        owner: prometheus
+        group: prometheus
+        mode: u+rwx
+      notify: restart resource-exporter
+    - name: set resource-reporter.config.json
+      copy:
+        src: ./config.deploy.json
+        dest: /home/prometheus/resource-reporter.config.json
+        owner: prometheus
+        group: prometheus
+        mode: 0600
+      notify: restart resource-exporter
+    - name: set resource-exporter service
+      copy:
+        src: resource-reporter.service
+        dest: /etc/systemd/system/resource-reporter.service
+        mode: 0600
+      notify: restart resource-exporter
+    - name: Enable resource-reporter service
+      ansible.builtin.systemd:
+        name: resource-reporter
+        enabled: yes
+      notify: restart resource-exporter  
+  handlers:
+    - name: restart resource-exporter
+      ansible.builtin.systemd:
+        state: restarted
+        daemon_reload: yes
+        name: resource-reporter
+    #- name: Allow exporter to listen on tcp port 5050
+    #  community.general.seport:
+    #    ports: 5050
+    #    proto: tcp
+    #    setype: http_port_t
+    #    state: present
+    #- name: open firewall
+    #  ansible.posix.firewalld:
+    #    port: 5050/tcp
+    #    zone: public
+    #    permanent: yes
+    #    immediate: yes
+    #    state: enabled
