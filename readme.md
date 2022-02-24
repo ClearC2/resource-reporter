@@ -7,9 +7,58 @@ An http applicaton that serves as a webhook for AlertManager to send server comm
 This is meant to be installed on all servers being alerted on in prometheus/alertmanager.
 
 ## How it works
-The application needs a config file to run. The config file specifies alert names and corresponding shell commands relevant to inspecting why that alert was triggered. The app exposes a `/report?alertName=<alertName>&token=<token>` endpoint. Based on the `alertName` query parameter, the endpoint will run every command specified in the config file and respond with the output of each. These `alertName`s correspond with alerts defined in prometheus.
+The application needs a config file to run. The config file specifies alert names and corresponding shell commands relevant to inspecting why that alert was triggered. Here is an example configuration file:
 
-When an alert is triggered, AlertManager will send a POST request to the resource-reporter app's `/webhook` endpoint. This POST request will contain an array of alerts. Each alert has the server hostname that the alert was triggered for and an alert name("CPU Used", "RAM Used", "Disk Space"). For each alert, the webhook will send a request to the target server's resource-reporter app's `/report?alertName=<alertName>` endpont. The webhook will take that response and send a request to Slack to display a custom message in a designated slack channel with the command outputs(based on the preconfigured slack webhook).
+```json
+{
+    "slack": "https://hooks.slack.com/services/:token1/:token2",
+    "token": "secret-token123",
+    "alerts": {
+        "RAM Used": [
+           {"title": "Hostname", "command": "hostname"},
+           {"title": "Memory Summary", "command": "free -h"},
+           {"title": "ps - Ordered by MEM", "command": "ps ax --sort=-%mem -o pid,ruser=USER,%cpu=%CPU,%mem=%MEM,command | head -n 16"}
+        ],
+        "CPU Used": [
+            {"title": "Hostname", "command": "hostname"},
+            {"title": "ps - Ordered by CPU", "command": "ps ax --sort=-%cpu -o pid,ruser=USER,%cpu=%CPU,%mem=%MEM,command | head -n 16"}
+        ],
+        "Disk Space": [
+            {"title": "Hostname", "command": "hostname"},
+            {"title": "Disk Space", "command": "df -h"}
+        ]
+    },
+    "hosts": {
+        "somehostname": "100.200.300.400"
+    }
+}
+```
+
+
+The app exposes a `/report?alertName=<alertName>&token=<token>` endpoint. Based on the `alertName` query parameter, the endpoint will run every command specified in the config file and respond with the output of each. These `alertName`s correspond with alerts defined in prometheus.
+
+```sh
+curl "http://localhost:5050/report?alertName=Disk%20Space&token=secret-token123"
+```
+```json
+{
+  "commands": [
+    {
+      "title": "Hostname",
+      "command": "hostname",
+      "output": "dadams-mbpro.attlocal.net"
+    },
+    {
+      "title": "Disk Space",
+      "command": "df -h",
+      "output": "Filesystem       Size   Used  Avail Capacity iused      ifree %iused  Mounted on\n/dev/disk1s5s1  932Gi   22Gi  405Gi     6%  577263 4249848280    0%   /\ndevfs           194Ki  194Ki    0Bi   100%     672          0  100%   /dev\n/dev/disk1s4    932Gi  6.0Gi  405Gi     2%       6 4249848280    0%   /System/Volumes/VM\n/dev/disk1s2    932Gi  509Mi  405Gi     1%    3035 4249848280    0%   /System/Volumes/Preboot\n/dev/disk1s6    932Gi  106Mi  405Gi     1%     462 4249848280    0%   /System/Volumes/Update\n/dev/disk1s1    932Gi  496Gi  405Gi    56% 6845060 4249848280    0%   /System/Volumes/Data\nmap auto_home     0Bi    0Bi    0Bi   100%       0          0  100%   /System/Volumes/Data/home\n/dev/disk1s5    932Gi   22Gi  405Gi     6%  577696 4249848280    0%   /System/Volumes/Update/mnt1"
+    }
+  ]
+}
+
+```
+
+The app also has a `/webhook` endpoint that AlertManager can be configured to use. When an alert is triggered, AlertManager will send a POST request to the resource-reporter app's `/webhook` endpoint. This POST request will contain an array of alerts. Each alert has the server hostname that the alert was triggered for and an alert name("CPU Used", "RAM Used", "Disk Space"). For each alert, the webhook will send a request to the target server's resource-reporter app's `/report?alertName=<alertName>` endpont. The webhook will take that response and send a request to Slack to display a custom message in a designated slack channel with the command outputs(based on the preconfigured slack webhook).
 
 The `token` in the config file is an authentication token. It needs to be the same across all server installs. AlertManager is configured to use it when making a request to the webhook with the alerts payload. The webhook also uses it in requests to other resource-reporters `/report` endpoint to authenticate.
 
