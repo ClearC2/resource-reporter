@@ -66,7 +66,7 @@ The `token` in the config file is an authentication token. It needs to be the sa
 There are two ways to install the resource-reporter.
 
 ### Ansible installation
-Copy the `config.linux.json` to `ansible/config.deploy.json` and fill out the slack endpoint and token.
+Clone the repository. Copy the `config.linux.json` to `ansible/config.deploy.json` and fill out the slack endpoint and token.
 
 Next, create a `ansible/hosts` file that contains a line for every server you would like to deploy to with your ssh username:
 ```
