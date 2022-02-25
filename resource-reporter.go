@@ -90,8 +90,7 @@ func getAlertHost(alert Alert) string {
 	return strings.Split(alert.Labels.Instance, ":")[0]
 }
 
-func processAlert(wg *sync.WaitGroup, alert Alert) {
-	defer wg.Done()
+func processAlert(alert Alert) {
 	config, _ := getConfig()
 	host := getAlertHost(alert)
 	if host == "" {
@@ -231,7 +230,10 @@ func main() {
 		for _, alert := range payload.Alerts {
 			if alert.Status == "firing" {
 				wg.Add(1)
-				go processAlert(&wg, alert)
+				go func() {
+					processAlert(alert)
+					wg.Done()
+				}()
 			}
 		}
 	})
