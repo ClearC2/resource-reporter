@@ -13,6 +13,7 @@
         ],
         "Disk Space": [
             {"title": "Hostname", "command": "hostname"},
+            {"title": "Disk Space Summary", "command": "df -h"},
             {"title": "/srv Disk Space", "command": "cd /srv && du -h --max-depth=1 2> /dev/null | sort -hr | tail -n +2 | head"},
             {"title": "/var Disk Space", "command": "cd /var && du -h --max-depth=1 2> /dev/null | sort -hr | tail -n +2 | head"}
         ]
