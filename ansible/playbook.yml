@@ -33,22 +33,22 @@
         name: resource-reporter
         enabled: yes
       notify: restart resource-exporter  
+    # - name: Allow exporter to listen on tcp port 5050
+    #   community.general.seport:
+    #     ports: 5050
+    #     proto: tcp
+    #     setype: http_port_t
+    #     state: present
+    # - name: open firewall
+    #   ansible.posix.firewalld:
+    #     port: 5050/tcp
+    #     zone: public
+    #     permanent: yes
+    #     immediate: yes
+    #     state: enabled
   handlers:
     - name: restart resource-exporter
       ansible.builtin.systemd:
         state: restarted
         daemon_reload: yes
         name: resource-reporter
-    #- name: Allow exporter to listen on tcp port 5050
-    #  community.general.seport:
-    #    ports: 5050
-    #    proto: tcp
-    #    setype: http_port_t
-    #    state: present
-    #- name: open firewall
-    #  ansible.posix.firewalld:
-    #    port: 5050/tcp
-    #    zone: public
-    #    permanent: yes
-    #    immediate: yes
-    #    state: enabled
