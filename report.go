@@ -93,21 +93,6 @@ func cutRunes(s string, n int) string {
 	return s[:n]
 }
 
-// truncateHead keeps the head of s and appends a truncation note, the result at most max bytes.
-// Task 4: replace with TruncateOutput.
-func truncateHead(s string, max int) string {
-	if len(s) <= max {
-		return s
-	}
-	note := fmt.Sprintf("\n… truncated (%d more characters)", len(s))
-	keep := max - len(note)
-	if keep < 0 {
-		return cutRunes(s, max)
-	}
-	head := cutRunes(s, keep)
-	return head + fmt.Sprintf("\n… truncated (%d more characters)", len(s)-len(head))
-}
-
 // formatTimeout prints a timeout of 1s or more rounded to whole seconds ("Ns"); a budget-clipped
 // timeout such as 14.998231407s prints "15s". Sub-second timeouts (tests only) print Go's duration text.
 func formatTimeout(d time.Duration) string {
@@ -119,7 +104,7 @@ func formatTimeout(d time.Duration) string {
 
 // RunCommand runs `bash -c command` in its own process group with LC_ALL=C. When the timeout
 // passes or ctx ends, the whole group is killed. The result is the trimmed stdout (what was
-// printed so far is kept), followed by a note on a non-zero exit or a timeout, at most maxChars bytes.
+// printed so far is kept), followed by a note on a non-zero exit or a timeout, at most maxChars characters.
 func RunCommand(ctx context.Context, command string, timeout time.Duration, maxChars int) string {
 	cmdCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -183,10 +168,15 @@ func RunCommand(ctx context.Context, command string, timeout time.Duration, maxC
 		out += "\n… truncated (output over 64 KiB)"
 	}
 	if out == "" {
-		return cutRunes(strings.TrimPrefix(suffix, "\n"), maxChars)
+		return headRunes(strings.TrimPrefix(suffix, "\n"), maxChars)
 	}
-	// Cut stdout, not the note, so the exit or timeout note always shows.
-	return truncateHead(out, maxChars-len(suffix)) + suffix
+	// Cut stdout, not the note, so the exit or timeout note shows. A note longer than maxChars
+	// itself is cut, so the result never exceeds maxChars.
+	room := maxChars - utf8.RuneCountInString(suffix)
+	if room <= 0 {
+		return headRunes(strings.TrimPrefix(suffix, "\n"), maxChars)
+	}
+	return TruncateOutput(out, room) + suffix
 }
 
 // RunReport runs an alert's commands one after another within cfg.ReportBudgetSeconds and returns

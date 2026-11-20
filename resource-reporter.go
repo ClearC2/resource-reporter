@@ -34,20 +34,6 @@ type CommandSectionsJSON struct {
 	Commands []*CommandSection `json:"commands"`
 }
 
-type SlackText struct {
-	Type string `json:"type"`
-	Text string `json:"text"`
-}
-
-type SlackBlock struct {
-	Type string    `json:"type"`
-	Text SlackText `json:"text"`
-}
-
-type SlackBlocks struct {
-	Blocks []SlackBlock `json:"blocks"`
-}
-
 type ErrorPayload struct {
 	Error string `json:"error"`
 }

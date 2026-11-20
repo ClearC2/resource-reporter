@@ -15,6 +15,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 // noProcessMatching fails the test if a process whose command line contains pattern is still
@@ -99,8 +100,8 @@ func TestRunCommandBackgroundChildDoesNotHang(t *testing.T) {
 
 func TestRunCommandTruncates(t *testing.T) {
 	got := RunCommand(context.Background(), "head -c 10000 /dev/zero | tr '\\0' x", 5*time.Second, 2900)
-	if len(got) > 2900 {
-		t.Errorf("len = %d, want <= 2900", len(got))
+	if n := utf8.RuneCountInString(got); n > 2900 {
+		t.Errorf("len = %d chars, want <= 2900", n)
 	}
 	if !strings.Contains(got, "truncated") {
 		t.Errorf("no truncation note: %q", got[len(got)-80:])
@@ -113,8 +114,8 @@ func TestRunCommandDrainsLargeOutput(t *testing.T) {
 	if strings.Contains(got, "timed out") {
 		t.Fatalf("command blocked on a full pipe: %q", got[len(got)-80:])
 	}
-	if len(got) > 2900 || !strings.Contains(got, "truncated") {
-		t.Errorf("len = %d, tail %q", len(got), got[len(got)-80:])
+	if n := utf8.RuneCountInString(got); n > 2900 || !strings.Contains(got, "truncated") {
+		t.Errorf("len = %d chars, tail %q", n, got[len(got)-80:])
 	}
 }
 
@@ -305,5 +306,17 @@ func TestValidTokenLogsAddressNotToken(t *testing.T) {
 	}
 	if validToken(&Config{Token: ""}, httptest.NewRequest(http.MethodGet, "/report?token=", nil)) {
 		t.Error("an empty configured token must never match")
+	}
+}
+
+func TestRunCommandTinyMaxCharsNeverExceeds(t *testing.T) {
+	// The exit note alone is longer than maxChars: the result must still fit.
+	got := RunCommand(context.Background(), "echo hello; exit 3", 5*time.Second, 5)
+	if n := utf8.RuneCountInString(got); n > 5 {
+		t.Errorf("len = %d chars, want <= 5: %q", n, got)
+	}
+	got = RunCommand(context.Background(), "echo hello; exit 3", 5*time.Second, 40)
+	if !strings.Contains(got, "exit status 3") || utf8.RuneCountInString(got) > 40 {
+		t.Errorf("normal case lost the exit note: %q", got)
 	}
 }
