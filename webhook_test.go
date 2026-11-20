@@ -274,12 +274,44 @@ func TestSeenAlertsNoticeOnly(t *testing.T) {
 	}
 }
 
+func TestSeenAlertsWindowTolerance(t *testing.T) {
+	every := 6 * time.Hour
+	s := NewSeenAlerts()
+	s.ShouldReport("k", testNow, every)
+	s.MarkReported("k")
+	if claimed(s, "k", testNow.Add(every-2*time.Minute), every) {
+		t.Error("a notification 2 minutes before the window's end got a claim")
+	}
+	if ok, retry := s.ShouldReport("k", testNow.Add(every-5*time.Millisecond), every); !ok || retry {
+		t.Errorf("a notification 5ms before the window's end (arrival jitter) should get a fresh claim: ok=%v retry=%v", ok, retry)
+	}
+
+	// Notice path: the same tolerance decides fresh claim versus retry.
+	s = NewSeenAlerts()
+	s.ShouldReport("n", testNow, every)
+	s.MarkNotice("n")
+	if ok, retry := s.ShouldReport("n", testNow.Add(every-5*time.Millisecond), every); !ok || retry {
+		t.Errorf("after a notice, 5ms before the window's end should be a fresh claim (new notice allowed): ok=%v retry=%v", ok, retry)
+	}
+
+	// Short windows get a proportionally smaller tolerance: every/60.
+	s = NewSeenAlerts()
+	s.ShouldReport("q", testNow, time.Hour)
+	s.MarkReported("q")
+	if claimed(s, "q", testNow.Add(time.Hour-2*time.Minute), time.Hour) {
+		t.Error("1h window: 2 minutes early got a claim (tolerance should be 1 minute)")
+	}
+	if !claimed(s, "q", testNow.Add(time.Hour-30*time.Second), time.Hour) {
+		t.Error("1h window: 30s early should be inside the 1 minute tolerance")
+	}
+}
+
 func TestSeenAlertsNoClaimOverBusy(t *testing.T) {
 	s := NewSeenAlerts()
 	every := 6 * time.Hour
 	s.ShouldReport("k", testNow, every)
 	s.MarkNotice("k")
-	if ok, retry := s.ShouldReport("k", testNow.Add(every-time.Minute), every); !ok || !retry {
+	if ok, retry := s.ShouldReport("k", testNow.Add(every-5*time.Minute), every); !ok || !retry {
 		t.Fatalf("retry claim not granted: ok=%v retry=%v", ok, retry)
 	}
 	// The window ends while the retry is still in progress: nobody else may claim the alert.

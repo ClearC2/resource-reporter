@@ -154,12 +154,13 @@ func mrkdwnBlock(text string) SlackBlock {
 // closingNote matches the status lines a host puts at the end of a command's output.
 var closingNote = regexp.MustCompile(`^(\((timed out after |exit status |killed by signal |skipped: |could not run: ).*\)|\(canceled\)|… truncated \(.*\))$`)
 
-// exitNote matches the "(exit status N)" line RunCommand puts before a failed command's last stderr line.
-var exitNote = regexp.MustCompile(`^\(exit status [0-9]+\)$`)
+// exitNote matches the "(exit status N)" and "(killed by signal X)" lines RunCommand puts before a
+// failed command's last stderr line.
+var exitNote = regexp.MustCompile(`^\((exit status [0-9]+|killed by signal [^()]+)\)$`)
 
 // splitClosingNote splits output into the text before its closing note and the note: the last line
 // when it is a host's status note or "… truncated" line, or the last two lines when the first of
-// them is "(exit status N)" (followed by the command's last stderr line).
+// them is "(exit status N)" or "(killed by signal X)" (followed by the command's last stderr line).
 func splitClosingNote(output string) (head, note string, ok bool) {
 	i := strings.LastIndexByte(output, '\n')
 	if i < 0 {

@@ -3,12 +3,14 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 	"unicode/utf8"
@@ -230,6 +232,18 @@ func TestBuildMessageKeepsExitNoteWithStderrLine(t *testing.T) {
 	long := strings.Repeat("x", 500) + "\n(exit status 1)\n" + strings.Repeat(">", 1000)
 	m = BuildMessage("desc", "fb", []CommandSection{{Output: long}}, "", 2900)
 	checkLimits(t, m)
+}
+
+func TestBuildMessageKeepsSignalNoteWithStderrLine(t *testing.T) {
+	// The note text exactly as RunCommand writes it for a SIGKILL'd command.
+	tail := fmt.Sprintf("(killed by signal %s)\nKilled", syscall.SIGKILL)
+	output := strings.Repeat("&", 2900-1-len(tail)) + "\n" + tail
+	m := BuildMessage("desc", "fb", []CommandSection{{Title: "du", Output: output}}, "", 2900)
+	checkLimits(t, m)
+	o := m.Blocks[2].Text.Text
+	if !strings.HasSuffix(o, "\n"+tail+"```") {
+		t.Errorf("output block lost the signal note and stderr line: tail %q", o[len(o)-60:])
+	}
 }
 
 func TestBuildMessageLongTitleAndHeader(t *testing.T) {

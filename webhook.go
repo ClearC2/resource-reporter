@@ -130,7 +130,7 @@ func (s *SeenAlerts) ShouldReport(key string, now time.Time, every time.Duration
 	if seen && e.busy {
 		return false, false
 	}
-	if !seen || now.Sub(e.at) >= every {
+	if !seen || windowPassed(e.at, now, every) {
 		s.last[key] = &seenAlert{at: now, claimedAt: now, busy: true}
 		return true, false
 	}
@@ -139,6 +139,13 @@ func (s *SeenAlerts) ShouldReport(key string, now time.Time, every time.Duration
 		return true, true
 	}
 	return false, false
+}
+
+// windowPassed reports whether the window of every that started at start has passed by now. A
+// notification on a fixed beat can arrive a few milliseconds early relative to the claim that started
+// the window, so the window counts as passed min(every/60, 1 minute) before its exact end.
+func windowPassed(start, now time.Time, every time.Duration) bool {
+	return now.Sub(start) >= every-min(every/60, time.Minute)
 }
 
 // MarkReported settles a claim: a real report was posted, and the window restarts at the time the
