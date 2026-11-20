@@ -108,10 +108,11 @@ func truncateHead(s string, max int) string {
 	return head + fmt.Sprintf("\n… truncated (%d more characters)", len(s)-len(head))
 }
 
-// formatTimeout prints whole seconds as "Ns" and anything else in Go's duration text.
+// formatTimeout prints a timeout of 1s or more rounded to whole seconds ("Ns"); a budget-clipped
+// timeout such as 14.998231407s prints "15s". Sub-second timeouts (tests only) print Go's duration text.
 func formatTimeout(d time.Duration) string {
-	if d%time.Second == 0 {
-		return fmt.Sprintf("%ds", int64(d/time.Second))
+	if d >= time.Second {
+		return fmt.Sprintf("%ds", int64(d.Round(time.Second)/time.Second))
 	}
 	return d.String()
 }

@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -167,6 +168,35 @@ func TestRunReportBudget(t *testing.T) {
 	}
 	if got[2].Output != "(skipped: report time budget used up)" {
 		t.Errorf("third output = %q", got[2].Output)
+	}
+}
+
+func TestFormatTimeout(t *testing.T) {
+	for d, want := range map[time.Duration]string{
+		20 * time.Second:                           "20s",
+		14998231407 * time.Nanosecond:              "15s",
+		time.Second + 200*time.Millisecond:         "1s",
+		300 * time.Millisecond:                     "300ms",
+		time.Duration(1700) * time.Millisecond:     "2s",
+		time.Duration(999999999) * time.Nanosecond: "999.999999ms",
+	} {
+		if got := formatTimeout(d); got != want {
+			t.Errorf("formatTimeout(%v) = %q, want %q", d, got, want)
+		}
+	}
+}
+
+func TestRunReportBudgetClipPrintsWholeSeconds(t *testing.T) {
+	// Budget 2s: the second command is clipped to the ~1.7s left, an arbitrary duration.
+	cfg := testConfig(map[string][]*CommandSection{
+		"X": {{Title: "a", Command: "sleep 0.3"}, {Title: "b", Command: "sleep 10"}},
+	}, 2)
+	got := RunReport(context.Background(), cfg, "X")
+	if len(got) != 2 {
+		t.Fatalf("got %d sections", len(got))
+	}
+	if !regexp.MustCompile(`\(timed out after [0-9]+s\)$`).MatchString(got[1].Output) {
+		t.Errorf("clipped timeout should print whole seconds: %q", got[1].Output)
 	}
 }
 
