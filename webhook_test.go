@@ -187,6 +187,9 @@ func TestAlertHost(t *testing.T) {
 		{"two words:9100", "", false},
 		{"{bad}:9100", "", false},
 		{":9100", "", false},
+		{"user@other:9100", "", false},
+		{"host?x=1:9100", "", false},
+		{"host#frag", "", false},
 	}
 	for _, c := range cases {
 		host, ok := AlertHost(cfg, testAlert(c.instance))
@@ -320,6 +323,16 @@ func TestProcessAlertUnreachableNoticeOff(t *testing.T) {
 	}
 	if !strings.Contains(logs.String(), "web1") {
 		t.Errorf("no log line names the host: %q", logs.String())
+	}
+	// Nothing was posted, so the same alert must not wait out repeat_hours: it tries the host again.
+	var hostCalls int
+	r.ReportURL = func(host string) string { hostCalls++; return closedURL(t) + "/report" }
+	r.ProcessAlert(context.Background(), testAlert("web1:9100"))
+	if hostCalls != 1 {
+		t.Errorf("second notification made %d host calls, want 1", hostCalls)
+	}
+	if n := len(slack.raw()); n != 0 {
+		t.Errorf("Slack got %d messages after the second try, want 0", n)
 	}
 }
 

@@ -43,7 +43,7 @@ type WebhookPayload struct {
 
 // AlertHost returns the host to ask for a report: the hosts map entry for the full instance value
 // when there is one, otherwise the instance without its trailing ":port". ok is false when the
-// result is empty or cannot be a host name (it contains "/", a space or "{").
+// result is empty or cannot be a host name (it contains "/", "@", "?", "#", a space or "{").
 func AlertHost(cfg *Config, a Alert) (host string, ok bool) {
 	instance := a.Labels.Instance
 	if mapped := cfg.Hosts[instance]; mapped != "" {
@@ -54,7 +54,7 @@ func AlertHost(cfg *Config, a Alert) (host string, ok bool) {
 			host = instance[:i]
 		}
 	}
-	if host == "" || strings.ContainsAny(host, "/ {") {
+	if host == "" || strings.ContainsAny(host, "/@?# {") {
 		return "", false
 	}
 	return host, true
@@ -164,6 +164,8 @@ func (r *Reporter) ProcessAlert(ctx context.Context, a Alert) {
 	} else {
 		log.Printf("alert %q: no report from %s: %s", name, host, reason)
 		if !cfg.NoticeUnreachable() {
+			// Nothing is posted, so let Alertmanager's next notification try again.
+			r.Seen.Forget(key)
 			return
 		}
 		note := fmt.Sprintf("No report could be collected from %s: %s", host, reason)
