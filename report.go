@@ -24,6 +24,9 @@ const (
 	maxStderrLine    = 200      // longest stderr line shown in the output
 	commandWaitDelay = 2 * time.Second
 	budgetSkipped    = "(skipped: report time budget used up)"
+	// reportWriteMargin is added to the report budget for the /report reply's write deadline: room
+	// for the per-command kill grace (commandWaitDelay) and for sending the reply.
+	reportWriteMargin = 30 * time.Second
 )
 
 // headWriter keeps the first max bytes written and silently discards the rest, so the
@@ -94,7 +97,9 @@ func cutRunes(s string, n int) string {
 }
 
 // formatTimeout prints a timeout of 1s or more rounded to whole seconds ("Ns"); a budget-clipped
-// timeout such as 14.998231407s prints "15s". Sub-second timeouts (tests only) print Go's duration text.
+// timeout such as 14.998231407s prints "15s". Sub-second timeouts print Go's duration text; they only
+// come from tests calling RunCommand directly, since settings give whole seconds and RunReport skips
+// a command with less than one second of budget left.
 func formatTimeout(d time.Duration) string {
 	if d >= time.Second {
 		return fmt.Sprintf("%ds", int64(d.Round(time.Second)/time.Second))
@@ -180,7 +185,8 @@ func RunCommand(ctx context.Context, command string, timeout time.Duration, maxC
 }
 
 // RunReport runs an alert's commands one after another within cfg.ReportBudgetSeconds and returns
-// copies with Output filled; cfg is never written. A command reached with no budget left is skipped.
+// copies with Output filled; cfg is never written. A command reached with less than one second of
+// budget left is skipped.
 func RunReport(ctx context.Context, cfg *Config, alertName string) []CommandSection {
 	deadline := time.Now().Add(time.Duration(cfg.ReportBudgetSeconds) * time.Second)
 	sections := make([]CommandSection, 0, len(cfg.Alerts[alertName]))
@@ -194,7 +200,7 @@ func RunReport(ctx context.Context, cfg *Config, alertName string) []CommandSect
 			timeout = time.Duration(c.Timeout) * time.Second
 		}
 		left := time.Until(deadline)
-		if left <= 0 {
+		if left < time.Second {
 			s.Output = budgetSkipped
 		} else {
 			s.Output = RunCommand(ctx, c.Command, min(timeout, left), cfg.MaxOutputChars)
@@ -244,6 +250,11 @@ func reportHandler(store *ConfigStore) http.HandlerFunc {
 		if alertName == "" {
 			writeError(w, "Missing alert name")
 			return
+		}
+		// The server's WriteTimeout is fixed; give this reply as long as the budget allows instead.
+		deadline := time.Now().Add(time.Duration(cfg.ReportBudgetSeconds)*time.Second + reportWriteMargin)
+		if err := http.NewResponseController(w).SetWriteDeadline(deadline); err != nil && !errors.Is(err, http.ErrNotSupported) {
+			log.Printf("report %q: cannot set write deadline: %v", alertName, err)
 		}
 		sections := RunReport(r.Context(), cfg, alertName)
 		reply := reportReply{Commands: make([]reportEntry, 0, len(sections))}

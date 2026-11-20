@@ -643,6 +643,95 @@ func TestProcessAlertForgetsOnSlackFailure(t *testing.T) {
 	}
 }
 
+func TestProcessAlertSlackTimeoutPerAttempt(t *testing.T) {
+	captureLog(t)
+	srv, reqs := hangFirst(t)
+	host := newFakeHost(t, replyJSON(`{"commands":[]}`))
+	r := newTestReporter(t, srv.URL, host.srv.URL, `,"slack_timeout_seconds":1`)
+	start := time.Now()
+	r.ProcessAlert(context.Background(), testAlert("web1:9100"))
+	if d := time.Since(start); d > 4*time.Second {
+		t.Errorf("ProcessAlert took %v with a 1s Slack timeout", d)
+	}
+	if reqs.Load() != 2 {
+		t.Errorf("Slack got %d requests, want 2 (the hung one, then the retry)", reqs.Load())
+	}
+	r.ProcessAlert(context.Background(), testAlert("web1:9100"))
+	if n := len(host.Calls()); n != 1 {
+		t.Errorf("host got %d calls, want 1 (the retry posted, so the alert is reported)", n)
+	}
+	if r.Poster.Timeout != 0 {
+		t.Errorf("ProcessAlert changed the shared poster: Timeout = %v", r.Poster.Timeout)
+	}
+}
+
+// pickySlack is a fake Slack that rejects (400) any message with more than two blocks.
+func pickySlack(t *testing.T) (*httptest.Server, func() (accepted, rejected []SlackBlocks)) {
+	var mu sync.Mutex
+	var acc, rej []SlackBlocks
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var m SlackBlocks
+		raw, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(raw, &m)
+		mu.Lock()
+		defer mu.Unlock()
+		if len(m.Blocks) > 2 {
+			rej = append(rej, m)
+			w.WriteHeader(http.StatusBadRequest)
+			io.WriteString(w, "invalid_blocks: "+strings.Repeat("x", 200))
+			return
+		}
+		acc = append(acc, m)
+	}))
+	t.Cleanup(srv.Close)
+	return srv, func() ([]SlackBlocks, []SlackBlocks) {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]SlackBlocks(nil), acc...), append([]SlackBlocks(nil), rej...)
+	}
+}
+
+func TestProcessAlertSlackRejectsReport(t *testing.T) {
+	logs := captureLog(t)
+	srv, got := pickySlack(t)
+	host := newFakeHost(t, replyJSON(`{"commands":[{"title":"df","command":"df -h","output":"/ 91%"}]}`))
+	r := newTestReporter(t, srv.URL, host.srv.URL, "")
+	r.ProcessAlert(context.Background(), testAlert("web1:9100"))
+
+	accepted, rejected := got()
+	if len(rejected) != 1 || len(accepted) != 1 {
+		t.Fatalf("Slack accepted %d and rejected %d messages, want 1 and 1", len(accepted), len(rejected))
+	}
+	want := "Report rejected by Slack (400): invalid_blocks: " + strings.Repeat("x", 100-len("invalid_blocks: "))
+	if len(accepted[0].Blocks) != 2 || accepted[0].Blocks[0].Text.Text != "Disk almost full" ||
+		accepted[0].Blocks[1].Text.Text != want {
+		t.Errorf("fallback = %+v, want the title and %q", accepted[0].Blocks, want)
+	}
+	if !strings.Contains(logs.String(), "400") {
+		t.Errorf("rejection not logged: %q", logs.String())
+	}
+	// The fallback reached Slack, so the alert counts as reported.
+	r.ProcessAlert(context.Background(), testAlert("web1:9100"))
+	if n := len(host.Calls()); n != 1 {
+		t.Errorf("host got %d calls, want 1", n)
+	}
+}
+
+func TestProcessAlertSlackRejectsFallbackToo(t *testing.T) {
+	captureLog(t)
+	slack := newFakeSlack(t, http.StatusBadRequest)
+	host := newFakeHost(t, replyJSON(`{"commands":[{"title":"df","command":"df -h","output":"/ 91%"}]}`))
+	r := newTestReporter(t, slack.srv.URL, host.srv.URL, "")
+	r.ProcessAlert(context.Background(), testAlert("web1:9100"))
+	if n := len(slack.raw()); n != 2 {
+		t.Errorf("Slack got %d posts, want 2 (report, then fallback)", n)
+	}
+	r.ProcessAlert(context.Background(), testAlert("web1:9100"))
+	if n := len(host.Calls()); n != 2 {
+		t.Errorf("host got %d calls, want 2 (nothing reached Slack, so the alert was forgotten)", n)
+	}
+}
+
 func TestProcessAlertNeverLeaksToken(t *testing.T) {
 	logs := captureLog(t)
 	refuses := newFakeHost(t, func(w http.ResponseWriter, r *http.Request) {

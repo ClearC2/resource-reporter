@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -188,6 +189,34 @@ func TestBuildMessageEscapedOutputFits(t *testing.T) {
 	}
 }
 
+func TestBuildMessageKeepsClosingNote(t *testing.T) {
+	const note = "(timed out after 20s)"
+	output := strings.Repeat("&", 2900-1-len(note)) + "\n" + note // 2,900 characters, as a host sends it
+	m := BuildMessage("desc", "fb", []CommandSection{{Title: "ps", Output: output}}, "", 2900)
+	checkLimits(t, m)
+	o := m.Blocks[2].Text.Text
+	if !strings.HasSuffix(o, "\n"+note+"```") {
+		t.Errorf("output block lost the closing note: tail %q", o[len(o)-60:])
+	}
+	if !strings.Contains(o, "truncated") {
+		t.Errorf("output block does not say it was cut: tail %q", o[len(o)-60:])
+	}
+
+	// A host "truncated" line is kept the same way, also when the monitor's max_output_chars is lower.
+	hostCut := strings.Repeat("line of ps output\n", 200) + "… truncated (8000 more characters)"
+	m = BuildMessage("desc", "fb", []CommandSection{{Title: "ps", Output: hostCut}}, "", 1000)
+	o = m.Blocks[2].Text.Text
+	if !strings.HasSuffix(o, "\n… truncated (8000 more characters)```") || utf8.RuneCountInString(o) > 1006 {
+		t.Errorf("host truncated line not kept: %d chars, tail %q", utf8.RuneCountInString(o), o[len(o)-60:])
+	}
+
+	// Output that fits is left alone, and a note that is not the last line gets no special care.
+	short := "a & b\n" + note
+	if o := BuildMessage("d", "fb", []CommandSection{{Output: short}}, "", 2900).Blocks[2].Text.Text; o != "```a &amp; b\n"+note+"```" {
+		t.Errorf("short output changed: %q", o)
+	}
+}
+
 func TestBuildMessageLongTitleAndHeader(t *testing.T) {
 	c := []CommandSection{{Title: strings.Repeat("&", 5000), Output: "x"}}
 	m := BuildMessage(strings.Repeat("h", 500), "fb", c, "", 2900)
@@ -275,6 +304,56 @@ func TestPostRetryAfterCapped(t *testing.T) {
 	_ = p.Post(context.Background(), srv.URL, SlackBlocks{})
 	if len(slept) != 1 || slept[0] != 30*time.Second {
 		t.Errorf("slept %v, want [30s]", slept)
+	}
+}
+
+// hangFirst is a fake Slack whose first request hangs (until the client gives up or 10s pass) and
+// whose later requests succeed.
+func hangFirst(t *testing.T) (*httptest.Server, *atomic.Int32) {
+	var reqs atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if reqs.Add(1) == 1 {
+			io.Copy(io.Discard, r.Body) // after the body, the server notices the client leaving
+			select {
+			case <-r.Context().Done():
+			case <-time.After(10 * time.Second):
+			}
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(srv.Close)
+	return srv, &reqs
+}
+
+func TestPostTimeoutPerAttempt(t *testing.T) {
+	srv, reqs := hangFirst(t)
+	p := &SlackPoster{Timeout: 300 * time.Millisecond, Sleep: func(time.Duration) {}}
+	start := time.Now()
+	if err := p.Post(context.Background(), srv.URL+"/hook/SECRET", SlackBlocks{}); err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if d := time.Since(start); d < 300*time.Millisecond || d > 3*time.Second {
+		t.Errorf("Post took %v, want about the 300ms timeout", d)
+	}
+	if reqs.Load() != 2 {
+		t.Errorf("requests = %d, want 2", reqs.Load())
+	}
+}
+
+func TestPostStatusErrorCarriesCode(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		io.WriteString(w, "invalid_blocks")
+	}))
+	defer srv.Close()
+	err := (&SlackPoster{}).Post(context.Background(), srv.URL+"/hook/SECRET", SlackBlocks{})
+	var se *SlackStatusError
+	if !errors.As(err, &se) || se.StatusCode != http.StatusBadRequest || se.Body != "invalid_blocks" {
+		t.Fatalf("err = %#v, want a *SlackStatusError with 400 and the reply", err)
+	}
+	if strings.Contains(err.Error(), "SECRET") || strings.Contains(err.Error(), srv.URL) {
+		t.Errorf("URL leaked in error: %v", err)
 	}
 }
 

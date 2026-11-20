@@ -27,7 +27,7 @@ const (
 	maxReplyShown   = 200
 	retryDefault    = 2 * time.Second
 	retryCap        = 30 * time.Second
-	zeroWidthSpace  = "​"
+	zeroWidthSpace  = "\u200b"
 )
 
 type SlackText struct {
@@ -151,13 +151,38 @@ func mrkdwnBlock(text string) SlackBlock {
 	return SlackBlock{Type: "section", Text: SlackText{Type: "mrkdwn", Text: text}}
 }
 
+// closingNote matches the status lines a host puts at the end of a command's output.
+var closingNote = regexp.MustCompile(`^(\((timed out after |exit status |killed by signal |skipped: |could not run: ).*\)|\(canceled\)|… truncated \(.*\))$`)
+
+// splitClosingNote splits output into the text before its last line and that line, when the last
+// line is a host's status note or "… truncated" line.
+func splitClosingNote(output string) (head, note string, ok bool) {
+	i := strings.LastIndexByte(output, '\n')
+	if i < 0 || !closingNote.MatchString(output[i+1:]) {
+		return "", "", false
+	}
+	return output[:i], output[i+1:], true
+}
+
 // outputBlockText returns the fenced, escaped output so the whole text is at most 3,000 characters.
+// When the output must be cut and ends in a host's status note, the note is kept and the text before
+// it is cut.
 func outputBlockText(output string, maxChars int) string {
 	if strings.TrimSpace(output) == "" {
 		return "```(no output)```"
 	}
 	const room = slackSectionMax - 6 - 2 // fences, and a space for each backtick at an edge
 	cut := func(s string, m int) string { return TruncateOutput(s, min(m, maxChars)) }
+	if head, note, ok := splitClosingNote(output); ok {
+		keep := utf8.RuneCountInString(note) + 1 // the note and its line break
+		cut = func(s string, m int) string {
+			m = min(m, maxChars)
+			if m <= keep || utf8.RuneCountInString(s) <= m {
+				return TruncateOutput(s, m)
+			}
+			return TruncateOutput(head, m-keep) + "\n" + note
+		}
+	}
 	body := fitEscaped(output, room, cut)
 	if body == "" {
 		body = "(output omitted)"
@@ -209,10 +234,23 @@ func BuildMessage(description, fallback string, commands []CommandSection, note 
 }
 
 // SlackPoster posts messages to a Slack incoming webhook. A nil Client means http.DefaultClient and
-// a nil Sleep means a wait that ends early when the context is done.
+// a nil Sleep means a wait that ends early when the context is done. Timeout, when above 0, limits
+// each attempt (each request and its reply) on its own.
 type SlackPoster struct {
-	Client *http.Client
-	Sleep  func(time.Duration)
+	Client  *http.Client
+	Sleep   func(time.Duration)
+	Timeout time.Duration
+}
+
+// SlackStatusError is Slack answering with a status other than 200. Body is the start of Slack's
+// reply. It never contains the webhook URL.
+type SlackStatusError struct {
+	StatusCode int
+	Body       string
+}
+
+func (e *SlackStatusError) Error() string {
+	return fmt.Sprintf("slack: HTTP %d: %s", e.StatusCode, e.Body)
 }
 
 // retryWait reads the Retry-After seconds header: default 2 s, at most 30 s.
@@ -245,10 +283,17 @@ func (p *SlackPoster) wait(ctx context.Context, d time.Duration) error {
 	}
 }
 
-// postOnce makes one request. retry reports a 429 or 5xx, with the wait the server asked for. Errors
-// never contain the webhook URL.
+// postOnce makes one request, limited to p.Timeout when set. retry reports a 429 or 5xx, with the wait
+// the server asked for, or an attempt cut by p.Timeout while ctx is still live. Errors never contain
+// the webhook URL; a status other than 200 is a *SlackStatusError.
 func (p *SlackPoster) postOnce(ctx context.Context, webhook string, payload []byte) (retry bool, wait time.Duration, err error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, webhook, bytes.NewReader(payload))
+	attemptCtx := ctx
+	if p.Timeout > 0 {
+		var cancel context.CancelFunc
+		attemptCtx, cancel = context.WithTimeout(ctx, p.Timeout)
+		defer cancel()
+	}
+	req, err := http.NewRequestWithContext(attemptCtx, http.MethodPost, webhook, bytes.NewReader(payload))
 	if err != nil {
 		return false, 0, errors.New("slack: invalid webhook URL")
 	}
@@ -263,7 +308,8 @@ func (p *SlackPoster) postOnce(ctx context.Context, webhook string, payload []by
 		if errors.As(err, &ue) {
 			err = ue.Err // *url.Error carries the URL
 		}
-		return false, 0, fmt.Errorf("slack: post failed: %w", err)
+		timedOut := attemptCtx.Err() != nil && ctx.Err() == nil
+		return timedOut, retryDefault, fmt.Errorf("slack: post failed: %w", err)
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, maxReplyRead))
@@ -274,13 +320,14 @@ func (p *SlackPoster) postOnce(ctx context.Context, webhook string, payload []by
 	if len(shown) > maxReplyShown {
 		shown = shown[:maxReplyShown]
 	}
-	err = fmt.Errorf("slack: HTTP %d: %s", resp.StatusCode, strings.ToValidUTF8(strings.TrimSpace(string(shown)), ""))
+	err = &SlackStatusError{StatusCode: resp.StatusCode, Body: strings.ToValidUTF8(strings.TrimSpace(string(shown)), "")}
 	retry = resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500
 	return retry, retryWait(resp.Header), err
 }
 
 // Post sends msg to the webhook. Success is HTTP 200. On 429 or 5xx it waits Retry-After and tries
-// once more; anything else, or a second failure, is an error with the status and the start of the reply.
+// once more, as it does after an attempt cut by p.Timeout (waiting 2 s); anything else, or a second
+// failure, is an error with the status and the start of the reply.
 func (p *SlackPoster) Post(ctx context.Context, webhook string, msg SlackBlocks) error {
 	payload, err := json.Marshal(msg)
 	if err != nil {

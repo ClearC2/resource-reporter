@@ -148,15 +148,15 @@ func TestRunReportUnknownAlert(t *testing.T) {
 func TestRunReportBudget(t *testing.T) {
 	cfg := testConfig(map[string][]*CommandSection{
 		"X": {
-			{Title: "a", Command: "sleep 0.6"},
+			{Title: "a", Command: "sleep 1.2"},
 			{Title: "b", Command: "sleep 0.6"},
 			{Title: "c", Command: "sleep 0.6"},
 		},
-	}, 1)
+	}, 2)
 	start := time.Now()
 	got := RunReport(context.Background(), cfg, "X")
-	if d := time.Since(start); d > 2*time.Second {
-		t.Errorf("report took %v, budget is 1s", d)
+	if d := time.Since(start); d > 3*time.Second {
+		t.Errorf("report took %v, budget is 2s", d)
 	}
 	if len(got) != 3 {
 		t.Fatalf("got %d sections", len(got))
@@ -164,11 +164,11 @@ func TestRunReportBudget(t *testing.T) {
 	if got[0].Output != "" {
 		t.Errorf("first command should finish: %q", got[0].Output)
 	}
-	if !strings.Contains(got[1].Output, "(timed out after") {
-		t.Errorf("second command should be cut by the budget: %q", got[1].Output)
-	}
-	if got[2].Output != "(skipped: report time budget used up)" {
-		t.Errorf("third output = %q", got[2].Output)
+	// About 0.8s is left for the second command: less than a second is not worth starting.
+	for i := 1; i < 3; i++ {
+		if got[i].Output != "(skipped: report time budget used up)" {
+			t.Errorf("output %d = %q, want the budget skip note", i, got[i].Output)
+		}
 	}
 }
 
@@ -279,6 +279,32 @@ func TestReportHandler(t *testing.T) {
 			t.Errorf("reply leaks the timeout key: %s", rec.Body.String())
 		}
 	})
+}
+
+func TestReportHandlerOutlivesServerWriteTimeout(t *testing.T) {
+	// The server's WriteTimeout (1s) is shorter than the report (~1.5s, budget 5s): the handler's own
+	// write deadline must keep the reply from being dropped.
+	path := filepath.Join(t.TempDir(), "config.json")
+	writeSettings(t, path, `{"token":"test-token","report_budget_seconds":5,
+		"alerts":{"Slow":[{"title":"slow","command":"sleep 1.5; echo done"}]}}`)
+	store, err := NewConfigStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewUnstartedServer(reportHandler(store))
+	srv.Config.WriteTimeout = time.Second
+	srv.Start()
+	t.Cleanup(srv.Close)
+
+	resp, err := http.Get(srv.URL + "/report?token=test-token&alertName=Slow")
+	if err != nil {
+		t.Fatalf("reply did not arrive: %v", err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil || resp.StatusCode != http.StatusOK || !strings.Contains(string(body), `"output":"done"`) {
+		t.Fatalf("status %d, body %s, err %v", resp.StatusCode, body, err)
+	}
 }
 
 func TestValidTokenLogsAddressNotToken(t *testing.T) {

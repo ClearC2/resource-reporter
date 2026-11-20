@@ -253,20 +253,38 @@ func (r *Reporter) ProcessAlert(ctx context.Context, a Alert) {
 	}
 
 	msg := BuildMessage(a.Annotations.Description, fallback, commands, "", cfg.MaxOutputChars)
-	if err := r.post(ctx, cfg, msg); err != nil {
-		log.Printf("alert %q on %q: %v", name, host, err)
+	err := r.post(ctx, cfg, msg)
+	if err == nil {
+		r.Seen.MarkReported(key, r.Now())
+		log.Printf("alert %q on %q: reported", name, host)
+		return
+	}
+	log.Printf("alert %q on %q: %v", name, host, err)
+	var rejected *SlackStatusError
+	if len(commands) == 0 || !errors.As(err, &rejected) || rejected.StatusCode < 400 || rejected.StatusCode > 499 ||
+		rejected.StatusCode == http.StatusTooManyRequests {
+		giveUp()
+		return
+	}
+	// Slack refused this message outright and would refuse it again: post the title with a note instead.
+	note := fmt.Sprintf("Report rejected by Slack (%d): %s", rejected.StatusCode, headRunes(rejected.Body, 100))
+	if err := r.post(ctx, cfg, BuildMessage(a.Annotations.Description, fallback, nil, note, cfg.MaxOutputChars)); err != nil {
+		log.Printf("alert %q on %q: rejection note: %v", name, host, err)
 		giveUp()
 		return
 	}
 	r.Seen.MarkReported(key, r.Now())
-	log.Printf("alert %q on %q: reported", name, host)
+	log.Printf("alert %q on %q: report rejected by Slack, title and note posted", name, host)
 }
 
-// post sends msg to the settings' Slack webhook. Its errors never contain the webhook URL.
+// post sends msg to the settings' Slack webhook, each attempt limited to slack_timeout_seconds. Its
+// errors never contain the webhook URL.
 func (r *Reporter) post(ctx context.Context, cfg *Config, msg SlackBlocks) error {
 	ctx, cancel := context.WithTimeout(ctx, time.Duration(2*cfg.SlackTimeoutSeconds+32)*time.Second)
 	defer cancel()
-	return r.Poster.Post(ctx, cfg.Slack, msg)
+	poster := *r.Poster // a copy: the settings may change between alerts
+	poster.Timeout = time.Duration(cfg.SlackTimeoutSeconds) * time.Second
+	return poster.Post(ctx, cfg.Slack, msg)
 }
 
 // hostReply is the /report reply; a missing or null "commands" means no commands.
