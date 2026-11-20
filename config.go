@@ -150,8 +150,3 @@ func (s *ConfigStore) Get() *Config {
 	log.Printf("settings: reloaded")
 	return s.current
 }
-
-// getConfig is a shim for the 2022 handlers in resource-reporter.go; Task 6 deletes it.
-func getConfig() (*Config, error) {
-	return LoadConfig(os.Args[1])
-}
