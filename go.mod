@@ -1,3 +1,3 @@
 module github.com/clearc2/resource-reporter
 
-go 1.17
+go 1.27
