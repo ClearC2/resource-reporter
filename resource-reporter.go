@@ -7,7 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"os/exec"
+	"os"
 	"strings"
 	"sync"
 )
@@ -138,53 +138,19 @@ func writeJson(w http.ResponseWriter, payload []byte) {
 
 func writeError(w http.ResponseWriter, err string) {
 	payload, _ := json.Marshal(ErrorPayload{Error: err})
+	w.Header().Set("Content-Type", "application/json") // must precede WriteHeader to take effect
 	w.WriteHeader(http.StatusBadRequest)
-	writeJson(w, payload)
+	w.Write(payload)
 }
 
 func main() {
-	_, configErr := getConfig()
-	if configErr != nil {
-		fmt.Println("Could not parse config")
+	store, err := NewConfigStore(os.Args[1])
+	if err != nil {
+		fmt.Println("Could not parse config:", err)
 		return
 	}
 
-	http.HandleFunc("/report", func(w http.ResponseWriter, r *http.Request) {
-		if !validateToken(w, r) {
-			return
-		}
-		alertName := r.URL.Query().Get("alertName")
-		if alertName == "" {
-			writeError(w, "Missing alert name")
-			return
-		}
-		config, _ := getConfig()
-		var commands []*CommandSection
-		if len(config.Alerts[alertName]) > 0 {
-			commands = config.Alerts[alertName]
-		} else {
-			commands = []*CommandSection{}
-		}
-
-		// run commands
-		for _, commandSection := range commands {
-			out, err := exec.Command("bash", "-c", commandSection.Command).Output()
-			if err != nil {
-				commandSection.Output = err.Error()
-			} else {
-				commandSection.Output = strings.TrimSpace(string(out))
-			}
-		}
-
-		// respond with command results
-		jsonResponse := CommandSectionsJSON{Commands: commands}
-		jsonResp, err := json.Marshal(jsonResponse)
-		if err != nil {
-			writeError(w, "Could not encode command output")
-		} else {
-			writeJson(w, jsonResp)
-		}
-	})
+	http.HandleFunc("/report", reportHandler(store))
 
 	http.HandleFunc("/webhook", func(w http.ResponseWriter, r *http.Request) {
 		if !validateToken(w, r) {
