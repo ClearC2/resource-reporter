@@ -7,3 +7,4 @@ config.deploy.json
 scratch.sh
 ansible/hosts
 ansible/config.deploy.json
+resource-reporter.linux-amd64.sha256

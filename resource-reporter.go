@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net/http"
 	"net/url"
 	"os"
@@ -107,7 +107,7 @@ func processAlert(alert Alert) {
 		return
 	}
 	defer res.Body.Close()
-	body, _ := ioutil.ReadAll(res.Body)
+	body, _ := io.ReadAll(res.Body)
 	var payload CommandSectionsJSON
 	unmarshallErr := json.Unmarshal(body, &payload)
 	if unmarshallErr != nil {
@@ -219,7 +219,7 @@ func main() {
 		}
 		defer r.Body.Close()
 		var payload WebhookPayload
-		body, _ := ioutil.ReadAll(r.Body)
+		body, _ := io.ReadAll(r.Body)
 		err := json.Unmarshal(body, &payload)
 		if err != nil {
 			writeError(w, "Could now parse payload")
