@@ -154,19 +154,29 @@ func mrkdwnBlock(text string) SlackBlock {
 // closingNote matches the status lines a host puts at the end of a command's output.
 var closingNote = regexp.MustCompile(`^(\((timed out after |exit status |killed by signal |skipped: |could not run: ).*\)|\(canceled\)|… truncated \(.*\))$`)
 
-// splitClosingNote splits output into the text before its last line and that line, when the last
-// line is a host's status note or "… truncated" line.
+// exitNote matches the "(exit status N)" line RunCommand puts before a failed command's last stderr line.
+var exitNote = regexp.MustCompile(`^\(exit status [0-9]+\)$`)
+
+// splitClosingNote splits output into the text before its closing note and the note: the last line
+// when it is a host's status note or "… truncated" line, or the last two lines when the first of
+// them is "(exit status N)" (followed by the command's last stderr line).
 func splitClosingNote(output string) (head, note string, ok bool) {
 	i := strings.LastIndexByte(output, '\n')
-	if i < 0 || !closingNote.MatchString(output[i+1:]) {
+	if i < 0 {
 		return "", "", false
 	}
-	return output[:i], output[i+1:], true
+	if closingNote.MatchString(output[i+1:]) {
+		return output[:i], output[i+1:], true
+	}
+	if j := strings.LastIndexByte(output[:i], '\n'); j >= 0 && exitNote.MatchString(output[j+1:i]) {
+		return output[:j], output[j+1:], true
+	}
+	return "", "", false
 }
 
 // outputBlockText returns the fenced, escaped output so the whole text is at most 3,000 characters.
-// When the output must be cut and ends in a host's status note, the note is kept and the text before
-// it is cut.
+// When the output must be cut and ends in a host's status note (see splitClosingNote), the note is
+// kept and the text before it is cut; a note too long for the block falls back to a plain cut.
 func outputBlockText(output string, maxChars int) string {
 	if strings.TrimSpace(output) == "" {
 		return "```(no output)```"

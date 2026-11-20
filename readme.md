@@ -100,6 +100,7 @@ The webhook answers AlertManager at once and does its reporting in the backgroun
 
 #### When Slack rejects a report
 If Slack refuses a report outright (a 4xx answer other than 429, for example because of a limit nobody can test offline), the monitor posts the alert title with the line "Report rejected by Slack (status): start of Slack's reply" instead, so the alert does not vanish. When that post succeeds the alert counts as reported; when it fails too, the failure is logged and the next notification tries again.
+This fallback applies only to reports that carried command output; a title-only post that Slack rejects is simply retried on the next notification.
 
 #### Known limitations
 - Many alerts reported at the same instant (a fleet-wide event, or the first notification after a monitor restart) can hit Slack's rate limit for the webhook. Each post is retried once; a follow-up that still fails is logged and retried on AlertManager's next notification.

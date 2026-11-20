@@ -93,6 +93,7 @@ func isPort(s string) bool {
 // seenAlert is the repeat memory's record of one alert.
 type seenAlert struct {
 	at         time.Time // when the current window started
+	claimedAt  time.Time // when the current (or last) claim was granted
 	noticeOnly bool      // only a "no report could be collected" notice has been posted
 	busy       bool      // a caller holds the claim and has not settled it yet
 }
@@ -111,8 +112,9 @@ func NewSeenAlerts() *SeenAlerts {
 // ShouldReport claims the alert with this key when it is due. ok is true for a fresh claim (the
 // alert is new or its window of every has passed) and for a retry (inside the window only a notice
 // was posted, so the host is asked again); retry tells the two apart. A claim is held until the
-// caller settles it with MarkReported, MarkNotice, Release or Forget, so of two simultaneous callers
-// only one gets ok. every <= 0 always gives a fresh claim. Entries older than 2*every are dropped.
+// caller settles it with MarkReported, MarkNotice, Release or Forget; while it is held nobody else
+// gets ok, not even once the window has passed. every <= 0 always gives a fresh claim. Entries older
+// than 2*every are dropped.
 func (s *SeenAlerts) ShouldReport(key string, now time.Time, every time.Duration) (ok, retry bool) {
 	if every <= 0 {
 		return true, false
@@ -125,23 +127,27 @@ func (s *SeenAlerts) ShouldReport(key string, now time.Time, every time.Duration
 		}
 	}
 	e, seen := s.last[key]
+	if seen && e.busy {
+		return false, false
+	}
 	if !seen || now.Sub(e.at) >= every {
-		s.last[key] = &seenAlert{at: now, busy: true}
+		s.last[key] = &seenAlert{at: now, claimedAt: now, busy: true}
 		return true, false
 	}
-	if e.noticeOnly && !e.busy {
-		e.busy = true
+	if e.noticeOnly {
+		e.busy, e.claimedAt = true, now
 		return true, true
 	}
 	return false, false
 }
 
-// MarkReported settles a claim: a real report was posted, and the window restarts at now.
-func (s *SeenAlerts) MarkReported(key string, now time.Time) {
+// MarkReported settles a claim: a real report was posted, and the window restarts at the time the
+// claim was granted (when the notification arrived, not when the post finished).
+func (s *SeenAlerts) MarkReported(key string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if e := s.last[key]; e != nil {
-		*e = seenAlert{at: now}
+		*e = seenAlert{at: e.claimedAt, claimedAt: e.claimedAt}
 	}
 }
 
@@ -224,13 +230,20 @@ func (r *Reporter) ProcessAlert(ctx context.Context, a Alert) {
 	}
 	// giveUp settles a claim that posted nothing: a fresh claim is forgotten so the next notification
 	// tries again; a retry stays notice-only (its notice is already in Slack).
+	settled := false
 	giveUp := func() {
+		settled = true
 		if retry {
 			r.Seen.Release(key)
 		} else {
 			r.Seen.Forget(key)
 		}
 	}
+	defer func() {
+		if !settled {
+			giveUp() // a panic (recovered by runAlert) must not leave the claim held
+		}
+	}()
 
 	fallback := name + " on " + host
 	commands, reason := r.fetchReport(ctx, cfg, host, name)
@@ -247,6 +260,7 @@ func (r *Reporter) ProcessAlert(ctx context.Context, a Alert) {
 			giveUp()
 			return
 		}
+		settled = true
 		r.Seen.MarkNotice(key)
 		log.Printf("alert %q on %q: notice posted", name, host)
 		return
@@ -255,7 +269,8 @@ func (r *Reporter) ProcessAlert(ctx context.Context, a Alert) {
 	msg := BuildMessage(a.Annotations.Description, fallback, commands, "", cfg.MaxOutputChars)
 	err := r.post(ctx, cfg, msg)
 	if err == nil {
-		r.Seen.MarkReported(key, r.Now())
+		settled = true
+		r.Seen.MarkReported(key)
 		log.Printf("alert %q on %q: reported", name, host)
 		return
 	}
@@ -273,7 +288,8 @@ func (r *Reporter) ProcessAlert(ctx context.Context, a Alert) {
 		giveUp()
 		return
 	}
-	r.Seen.MarkReported(key, r.Now())
+	settled = true
+	r.Seen.MarkReported(key)
 	log.Printf("alert %q on %q: report rejected by Slack, title and note posted", name, host)
 }
 

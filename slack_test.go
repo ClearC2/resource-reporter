@@ -217,6 +217,21 @@ func TestBuildMessageKeepsClosingNote(t *testing.T) {
 	}
 }
 
+func TestBuildMessageKeepsExitNoteWithStderrLine(t *testing.T) {
+	const tail = "(exit status 3)\nboom"
+	output := strings.Repeat("&", 2900-1-len(tail)) + "\n" + tail
+	m := BuildMessage("desc", "fb", []CommandSection{{Title: "nginx -t", Output: output}}, "", 2900)
+	checkLimits(t, m)
+	o := m.Blocks[2].Text.Text
+	if !strings.HasSuffix(o, "\n"+tail+"```") {
+		t.Errorf("output block lost the exit note and stderr line: tail %q", o[len(o)-60:])
+	}
+	// A tail that cannot fit the block falls back to a plain cut, still within limits.
+	long := strings.Repeat("x", 500) + "\n(exit status 1)\n" + strings.Repeat(">", 1000)
+	m = BuildMessage("desc", "fb", []CommandSection{{Output: long}}, "", 2900)
+	checkLimits(t, m)
+}
+
 func TestBuildMessageLongTitleAndHeader(t *testing.T) {
 	c := []CommandSection{{Title: strings.Repeat("&", 5000), Output: "x"}}
 	m := BuildMessage(strings.Repeat("h", 500), "fb", c, "", 2900)

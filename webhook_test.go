@@ -223,7 +223,7 @@ func TestSeenAlerts(t *testing.T) {
 	if ok, retry := s.ShouldReport("k", testNow, every); !ok || retry {
 		t.Fatalf("first report should go out as a fresh claim: ok=%v retry=%v", ok, retry)
 	}
-	s.MarkReported("k", testNow)
+	s.MarkReported("k")
 	if claimed(s, "k", testNow.Add(5*time.Hour), every) {
 		t.Fatal("repeat after 5h should be quiet")
 	}
@@ -265,12 +265,30 @@ func TestSeenAlertsNoticeOnly(t *testing.T) {
 	if ok, retry := s.ShouldReport("k", testNow.Add(2*time.Hour), every); !ok || !retry {
 		t.Fatalf("released retry should be claimable as a retry again: ok=%v retry=%v", ok, retry)
 	}
-	s.MarkReported("k", testNow.Add(2*time.Hour))
+	s.MarkReported("k")
 	if claimed(s, "k", testNow.Add(7*time.Hour), every) {
 		t.Fatal("a report after a notice starts the normal window from the report")
 	}
 	if ok, retry := s.ShouldReport("k", testNow.Add(8*time.Hour), every); !ok || retry {
 		t.Fatalf("after the window a fresh claim is due: ok=%v retry=%v", ok, retry)
+	}
+}
+
+func TestSeenAlertsNoClaimOverBusy(t *testing.T) {
+	s := NewSeenAlerts()
+	every := 6 * time.Hour
+	s.ShouldReport("k", testNow, every)
+	s.MarkNotice("k")
+	if ok, retry := s.ShouldReport("k", testNow.Add(every-time.Minute), every); !ok || !retry {
+		t.Fatalf("retry claim not granted: ok=%v retry=%v", ok, retry)
+	}
+	// The window ends while the retry is still in progress: nobody else may claim the alert.
+	if ok, _ := s.ShouldReport("k", testNow.Add(every), every); ok {
+		t.Fatal("a claim was granted over a busy entry")
+	}
+	s.Release("k")
+	if ok, retry := s.ShouldReport("k", testNow.Add(every), every); !ok || retry {
+		t.Fatalf("after the retry settled, the window's end gives a fresh claim: ok=%v retry=%v", ok, retry)
 	}
 }
 
@@ -455,6 +473,72 @@ func TestProcessAlertNoticeOnceWhileUnreachable(t *testing.T) {
 	r.ProcessAlert(context.Background(), testAlert("web1:9100"))
 	if n := len(slack.raw()); n != 2 {
 		t.Errorf("Slack got %d messages after the window, want 2", n)
+	}
+}
+
+// movingClock is a Reporter clock that the fake host can move forward while a report is being fetched.
+type movingClock struct{ ns atomic.Int64 }
+
+func (c *movingClock) Now() time.Time      { return time.Unix(0, c.ns.Load()).UTC() }
+func (c *movingClock) Set(t time.Time)     { c.ns.Store(t.UnixNano()) }
+func (c *movingClock) Add(d time.Duration) { c.ns.Add(int64(d)) }
+
+func TestProcessAlertWindowStartsAtClaim(t *testing.T) {
+	captureLog(t)
+	slack := newFakeSlack(t, http.StatusOK)
+	var down atomic.Bool
+	clock := &movingClock{}
+	host := newFakeHost(t, func(w http.ResponseWriter, r *http.Request) {
+		clock.Add(60 * time.Second) // the fetch and post take a minute
+		if down.Load() {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		replyJSON(`{"commands":[{"title":"df","command":"df -h","output":"/ 91%"}]}`)(w, r)
+	})
+	r := newTestReporter(t, slack.srv.URL, host.srv.URL, "")
+	r.Now = clock.Now
+
+	clock.Set(testNow)
+	r.ProcessAlert(context.Background(), testAlert("web1:9100"))
+	clock.Set(testNow.Add(6 * time.Hour)) // the next notification lands exactly 6h after the first
+	r.ProcessAlert(context.Background(), testAlert("web1:9100"))
+	if n := len(slack.raw()); n != 2 {
+		t.Fatalf("Slack got %d messages, want 2 (the repeat at exactly 6h reports)", n)
+	}
+
+	// A retry that ends in a report starts the window at the retry's claim.
+	a := testAlert("web2:9100")
+	down.Store(true)
+	clock.Set(testNow)
+	r.ProcessAlert(context.Background(), a) // notice
+	down.Store(false)
+	clock.Set(testNow.Add(time.Hour))
+	r.ProcessAlert(context.Background(), a) // retry: report
+	clock.Set(testNow.Add(7 * time.Hour))
+	r.ProcessAlert(context.Background(), a)
+	if n := len(slack.raw()); n != 5 {
+		t.Errorf("Slack got %d messages, want 5 (notice, report, and the repeat at exactly 6h after the retry)", n)
+	}
+}
+
+func TestProcessAlertPanicReleasesClaim(t *testing.T) {
+	captureLog(t)
+	slack := newFakeSlack(t, http.StatusOK)
+	host := newFakeHost(t, replyJSON(`{"commands":[]}`))
+	r := newTestReporter(t, slack.srv.URL, host.srv.URL, "")
+	var panicked atomic.Bool
+	r.ReportURL = func(h string) string {
+		if !panicked.Swap(true) {
+			panic("boom")
+		}
+		return host.srv.URL + "/report?host=" + h
+	}
+	r.wg.Add(1)
+	r.runAlert(testAlert("web1:9100"), time.Minute) // panics, recovered
+	r.ProcessAlert(context.Background(), testAlert("web1:9100"))
+	if n := len(host.Calls()); n != 1 {
+		t.Errorf("host got %d calls after the panic, want 1 (the claim must not stay held)", n)
 	}
 }
 
