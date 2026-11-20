@@ -43,7 +43,7 @@ type WebhookPayload struct {
 
 // AlertHost returns the host to ask for a report: the hosts map entry for the full instance value
 // when there is one, otherwise the instance without its trailing ":port". ok is false when the
-// result is empty or cannot be a host name (it contains "/", "@", "?", "#", a space or "{").
+// result is empty or cannot be a host name (see hostChars).
 func AlertHost(cfg *Config, a Alert) (host string, ok bool) {
 	instance := a.Labels.Instance
 	if mapped := cfg.Hosts[instance]; mapped != "" {
@@ -54,10 +54,28 @@ func AlertHost(cfg *Config, a Alert) (host string, ok bool) {
 			host = instance[:i]
 		}
 	}
-	if host == "" || strings.ContainsAny(host, "/@?# {") {
+	if !hostChars(host) {
 		return "", false
 	}
 	return host, true
+}
+
+// hostChars reports whether s is non-empty and holds only ASCII letters, digits, ".", "-", "_",
+// and "[", "]", ":" (for IPv6 literals).
+func hostChars(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case 'a' <= c && c <= 'z', 'A' <= c && c <= 'Z', '0' <= c && c <= '9':
+		case c == '.', c == '-', c == '_', c == '[', c == ']', c == ':':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func isPort(s string) bool {
@@ -72,35 +90,78 @@ func isPort(s string) bool {
 	return true
 }
 
-// SeenAlerts remembers when each alert was last reported. Safe for concurrent use.
+// seenAlert is the repeat memory's record of one alert.
+type seenAlert struct {
+	at         time.Time // when the current window started
+	noticeOnly bool      // only a "no report could be collected" notice has been posted
+	busy       bool      // a caller holds the claim and has not settled it yet
+}
+
+// SeenAlerts remembers which alerts were reported, and whether that was a real report or only a
+// notice. Safe for concurrent use.
 type SeenAlerts struct {
 	mu   sync.Mutex
-	last map[string]time.Time
+	last map[string]*seenAlert
 }
 
 func NewSeenAlerts() *SeenAlerts {
-	return &SeenAlerts{last: make(map[string]time.Time)}
+	return &SeenAlerts{last: make(map[string]*seenAlert)}
 }
 
-// ShouldReport reports whether the alert with this key is due: it is new or was last reported at
-// least every ago. A true answer records now, so of two simultaneous callers only one gets true.
-// every <= 0 always reports. Entries older than 2*every are dropped.
-func (s *SeenAlerts) ShouldReport(key string, now time.Time, every time.Duration) bool {
+// ShouldReport claims the alert with this key when it is due. ok is true for a fresh claim (the
+// alert is new or its window of every has passed) and for a retry (inside the window only a notice
+// was posted, so the host is asked again); retry tells the two apart. A claim is held until the
+// caller settles it with MarkReported, MarkNotice, Release or Forget, so of two simultaneous callers
+// only one gets ok. every <= 0 always gives a fresh claim. Entries older than 2*every are dropped.
+func (s *SeenAlerts) ShouldReport(key string, now time.Time, every time.Duration) (ok, retry bool) {
 	if every <= 0 {
-		return true
+		return true, false
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	for k, t := range s.last {
-		if now.Sub(t) > 2*every {
+	for k, e := range s.last {
+		if now.Sub(e.at) > 2*every {
 			delete(s.last, k)
 		}
 	}
-	if t, seen := s.last[key]; seen && now.Sub(t) < every {
-		return false
+	e, seen := s.last[key]
+	if !seen || now.Sub(e.at) >= every {
+		s.last[key] = &seenAlert{at: now, busy: true}
+		return true, false
 	}
-	s.last[key] = now
-	return true
+	if e.noticeOnly && !e.busy {
+		e.busy = true
+		return true, true
+	}
+	return false, false
+}
+
+// MarkReported settles a claim: a real report was posted, and the window restarts at now.
+func (s *SeenAlerts) MarkReported(key string, now time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if e := s.last[key]; e != nil {
+		*e = seenAlert{at: now}
+	}
+}
+
+// MarkNotice settles a fresh claim: only a notice was posted, so later notifications inside the
+// window ask the host again (without a second notice).
+func (s *SeenAlerts) MarkNotice(key string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if e := s.last[key]; e != nil {
+		e.noticeOnly, e.busy = true, false
+	}
+}
+
+// Release settles a retry claim that posted nothing: the alert stays notice-only.
+func (s *SeenAlerts) Release(key string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if e := s.last[key]; e != nil {
+		e.busy = false
+	}
 }
 
 // Forget drops the record for key, so the next notification for that alert reports again.
@@ -151,36 +212,61 @@ func (r *Reporter) ProcessAlert(ctx context.Context, a Alert) {
 		log.Printf("alert %q: instance %q is not a host, skipped", name, a.Labels.Instance)
 		return
 	}
-	key := host + "|" + name + "|" + a.StartsAt
-	if !r.Seen.ShouldReport(key, r.Now(), cfg.RepeatEvery()) {
+	if cfg.Hosts[a.Labels.Instance] == "" && !cfg.ReportHostAllowed(host) {
+		// The request carries the fleet token: never send it to a host nobody listed.
+		log.Printf("alert %q: host %q is not in report_hosts, skipped", name, host)
 		return
+	}
+	key := host + "|" + name + "|" + a.StartsAt
+	claimed, retry := r.Seen.ShouldReport(key, r.Now(), cfg.RepeatEvery())
+	if !claimed {
+		return
+	}
+	// giveUp settles a claim that posted nothing: a fresh claim is forgotten so the next notification
+	// tries again; a retry stays notice-only (its notice is already in Slack).
+	giveUp := func() {
+		if retry {
+			r.Seen.Release(key)
+		} else {
+			r.Seen.Forget(key)
+		}
 	}
 
 	fallback := name + " on " + host
 	commands, reason := r.fetchReport(ctx, cfg, host, name)
-	var msg SlackBlocks
-	if reason == "" {
-		msg = BuildMessage(a.Annotations.Description, fallback, commands, "", cfg.MaxOutputChars)
-	} else {
-		log.Printf("alert %q: no report from %s: %s", name, host, reason)
-		if !cfg.NoticeUnreachable() {
-			// Nothing is posted, so let Alertmanager's next notification try again.
-			r.Seen.Forget(key)
+	if reason != "" {
+		log.Printf("alert %q: no report from %q: %s", name, host, reason)
+		if retry || !cfg.NoticeUnreachable() {
+			// No (second) notice: let Alertmanager's next notification ask the host again.
+			giveUp()
 			return
 		}
 		note := fmt.Sprintf("No report could be collected from %s: %s", host, reason)
-		msg = BuildMessage(a.Annotations.Description, fallback, nil, note, cfg.MaxOutputChars)
-	}
-
-	slackCtx, cancel := context.WithTimeout(ctx, time.Duration(2*cfg.SlackTimeoutSeconds+32)*time.Second)
-	defer cancel()
-	if err := r.Poster.Post(slackCtx, cfg.Slack, msg); err != nil {
-		// Post's errors never contain the webhook URL. Forget the alert so the next notification retries.
-		log.Printf("alert %q on %s: %v", name, host, err)
-		r.Seen.Forget(key)
+		if err := r.post(ctx, cfg, BuildMessage(a.Annotations.Description, fallback, nil, note, cfg.MaxOutputChars)); err != nil {
+			log.Printf("alert %q on %q: %v", name, host, err)
+			giveUp()
+			return
+		}
+		r.Seen.MarkNotice(key)
+		log.Printf("alert %q on %q: notice posted", name, host)
 		return
 	}
-	log.Printf("alert %q on %s: reported", name, host)
+
+	msg := BuildMessage(a.Annotations.Description, fallback, commands, "", cfg.MaxOutputChars)
+	if err := r.post(ctx, cfg, msg); err != nil {
+		log.Printf("alert %q on %q: %v", name, host, err)
+		giveUp()
+		return
+	}
+	r.Seen.MarkReported(key, r.Now())
+	log.Printf("alert %q on %q: reported", name, host)
+}
+
+// post sends msg to the settings' Slack webhook. Its errors never contain the webhook URL.
+func (r *Reporter) post(ctx context.Context, cfg *Config, msg SlackBlocks) error {
+	ctx, cancel := context.WithTimeout(ctx, time.Duration(2*cfg.SlackTimeoutSeconds+32)*time.Second)
+	defer cancel()
+	return r.Poster.Post(ctx, cfg.Slack, msg)
 }
 
 // hostReply is the /report reply; a missing or null "commands" means no commands.
@@ -213,12 +299,15 @@ func (r *Reporter) fetchReport(ctx context.Context, cfg *Config, host, alertName
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Sprintf("host replied %d", resp.StatusCode)
 	}
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxHostReply))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxHostReply+1)) // one more byte shows a cut
 	if err != nil {
 		if ctx.Err() != nil {
 			return nil, "timed out"
 		}
 		return nil, "unreadable reply"
+	}
+	if len(body) > maxHostReply {
+		return nil, "reply too large"
 	}
 	var reply *hostReply // stays nil for a JSON null
 	if err := json.Unmarshal(body, &reply); err != nil || reply == nil {

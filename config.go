@@ -3,8 +3,11 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
+	"net"
 	"os"
+	"strings"
 	"sync"
 	"time"
 )
@@ -33,6 +36,75 @@ type Config struct {
 	HostTimeoutSeconds    int `json:"host_timeout_seconds"`
 	SlackTimeoutSeconds   int `json:"slack_timeout_seconds"`
 	MaxOutputChars        int `json:"max_output_chars"`
+
+	// Monitor side: when set, only hosts matching an entry (or named in Hosts) are asked for reports.
+	ReportHosts []string `json:"report_hosts"`
+}
+
+// reportHostRule is one parsed report_hosts entry: exactly one field is set.
+type reportHostRule struct {
+	name   string     // exact host name, lower case
+	suffix string     // ".example.com", lower case
+	ipnet  *net.IPNet // a CIDR, or a single IP address
+}
+
+// parseReportHost parses a report_hosts entry: an exact host name, a suffix starting with ".", a
+// CIDR, or a single IP address.
+func parseReportHost(entry string) (reportHostRule, error) {
+	e := strings.ToLower(entry)
+	cidr := e
+	if ip := net.ParseIP(e); ip != nil {
+		cidr = e + "/128"
+		if ip.To4() != nil {
+			cidr = e + "/32"
+		}
+	}
+	switch {
+	case strings.Contains(cidr, "/"):
+		if _, n, err := net.ParseCIDR(cidr); err == nil {
+			return reportHostRule{ipnet: n}, nil
+		}
+	case strings.HasPrefix(e, "."):
+		if nameChars(e[1:]) {
+			return reportHostRule{suffix: e}, nil
+		}
+	case nameChars(e):
+		return reportHostRule{name: e}, nil
+	}
+	return reportHostRule{}, fmt.Errorf("settings: report_hosts entry %q is not a host name, a .suffix or a CIDR", entry)
+}
+
+// nameChars reports whether s is a non-empty run of letters, digits, ".", "-" and "_".
+func nameChars(s string) bool {
+	return hostChars(s) && !strings.ContainsAny(s, "[]:")
+}
+
+// ReportHostAllowed reports whether the monitor may ask host for a report: always when report_hosts
+// is absent or empty, otherwise only when host matches an entry (names compare case-insensitively;
+// a CIDR matches a host that is an IP literal). Hosts from the hosts map are not checked here.
+func (c *Config) ReportHostAllowed(host string) bool {
+	if len(c.ReportHosts) == 0 {
+		return true
+	}
+	h := strings.ToLower(host)
+	ip := net.ParseIP(strings.TrimSuffix(strings.TrimPrefix(h, "["), "]"))
+	for _, entry := range c.ReportHosts {
+		rule, err := parseReportHost(entry)
+		switch {
+		case err != nil: // LoadConfig refuses such settings
+		case rule.ipnet != nil:
+			if ip != nil && rule.ipnet.Contains(ip) {
+				return true
+			}
+		case rule.suffix != "":
+			if len(h) > len(rule.suffix) && strings.HasSuffix(h, rule.suffix) {
+				return true
+			}
+		case h == rule.name:
+			return true
+		}
+	}
+	return false
 }
 
 const (
@@ -95,6 +167,11 @@ func LoadConfig(path string) (*Config, error) {
 	}
 	if c.Token == "" {
 		return nil, errors.New("settings: token is empty")
+	}
+	for _, entry := range c.ReportHosts {
+		if _, err := parseReportHost(entry); err != nil {
+			return nil, err
+		}
 	}
 	c.applyDefaults()
 	return &c, nil

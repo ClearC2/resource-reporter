@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -85,7 +86,58 @@ func TestLoadConfigRejectsEmptyToken(t *testing.T) {
 	}
 }
 
+func TestLoadConfigReportHosts(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	writeSettings(t, path, `{"token":"test-token","report_hosts":["web1.Example.com",".clearc2.com","192.168.100.0/24","fd00::/8","10.1.2.3"]}`)
+	c, err := LoadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for host, want := range map[string]bool{
+		"web1.example.com":     true, // exact, case-insensitive
+		"WEB1.EXAMPLE.COM":     true,
+		"web2.example.com":     false,
+		"db01.clearc2.com":     true, // suffix
+		"a.b.ClearC2.com":      true,
+		"clearc2.com":          false, // the suffix needs a label in front
+		"evilclearc2.com":      false,
+		"clearc2.com.evil.net": false,
+		"192.168.100.27":       true, // CIDR
+		"192.168.101.27":       false,
+		"[fd00::5]":            true,
+		"[fe80::1]":            false,
+		"site.example.com":     false,
+		"10.1.2.3":             true, // single address
+		"10.1.2.4":             false,
+	} {
+		if got := c.ReportHostAllowed(host); got != want {
+			t.Errorf("ReportHostAllowed(%q) = %v, want %v", host, got, want)
+		}
+	}
+
+	open := &Config{}
+	if !open.ReportHostAllowed("anything.example.org") {
+		t.Error("without report_hosts every host is allowed")
+	}
+	writeSettings(t, path, `{"token":"test-token","report_hosts":[]}`)
+	if c, err := LoadConfig(path); err != nil || !c.ReportHostAllowed("anything.example.org") {
+		t.Errorf("an empty report_hosts list allows every host: %v", err)
+	}
+}
+
+func TestLoadConfigRejectsBadReportHosts(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	for _, entry := range []string{`""`, `"."`, `"*.example.com"`, `"192.168.100.0/33"`, `"10.0.0.0/x"`,
+		`"bad host"`, `"web1:9100"`, `"http://web1"`, `5`} {
+		writeSettings(t, path, `{"token":"test-token","report_hosts":["ok.example.com",`+entry+`]}`)
+		if _, err := LoadConfig(path); err == nil {
+			t.Errorf("report_hosts entry %s was accepted", entry)
+		}
+	}
+}
+
 func TestConfigStoreKeepsLastGood(t *testing.T) {
+	logs := captureLog(t) // the bad file below is expected to log "settings: reload failed"
 	path := filepath.Join(t.TempDir(), "config.json")
 	writeSettings(t, path, `{"token":"test-token"}`)
 	s, err := NewConfigStore(path)
@@ -98,6 +150,9 @@ func TestConfigStoreKeepsLastGood(t *testing.T) {
 	writeSettings(t, path, `{not json`)
 	if got := s.Get().Token; got != "test-token" {
 		t.Fatalf("after bad file token = %q, want last good", got)
+	}
+	if !strings.Contains(logs.String(), "settings: reload failed") {
+		t.Errorf("bad file not logged: %q", logs.String())
 	}
 	writeSettings(t, path, `{"token":"test-token-2"}`)
 	if got := s.Get().Token; got != "test-token-2" {

@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -190,6 +191,17 @@ func TestAlertHost(t *testing.T) {
 		{"user@other:9100", "", false},
 		{"host?x=1:9100", "", false},
 		{"host#frag", "", false},
+		{`back\slash:9100`, "", false},
+		{"per%cent:9100", "", false},
+		{`quo"te:9100`, "", false},
+		{"it's:9100", "", false},
+		{"new\nline:9100", "", false},
+		{"tab\there:9100", "", false},
+		{"host\x00:9100", "", false},
+		{"hôst:9100", "", false},
+		{"Web_1-a.Example.com:9100", "Web_1-a.Example.com", true},
+		{"192.168.100.5:9100", "192.168.100.5", true},
+		{"[fe80::1]:9100", "[fe80::1]", true},
 	}
 	for _, c := range cases {
 		host, ok := AlertHost(cfg, testAlert(c.instance))
@@ -199,20 +211,27 @@ func TestAlertHost(t *testing.T) {
 	}
 }
 
+// claimed reports whether ShouldReport gave the caller the alert (fresh or retry).
+func claimed(s *SeenAlerts, key string, now time.Time, every time.Duration) bool {
+	ok, _ := s.ShouldReport(key, now, every)
+	return ok
+}
+
 func TestSeenAlerts(t *testing.T) {
 	s := NewSeenAlerts()
 	every := 6 * time.Hour
-	if !s.ShouldReport("k", testNow, every) {
-		t.Fatal("first report should go out")
+	if ok, retry := s.ShouldReport("k", testNow, every); !ok || retry {
+		t.Fatalf("first report should go out as a fresh claim: ok=%v retry=%v", ok, retry)
 	}
-	if s.ShouldReport("k", testNow.Add(5*time.Hour), every) {
+	s.MarkReported("k", testNow)
+	if claimed(s, "k", testNow.Add(5*time.Hour), every) {
 		t.Fatal("repeat after 5h should be quiet")
 	}
-	if !s.ShouldReport("k", testNow.Add(6*time.Hour), every) {
+	if !claimed(s, "k", testNow.Add(6*time.Hour), every) {
 		t.Fatal("repeat after 6h should go out")
 	}
 	for i := 0; i < 3; i++ {
-		if !s.ShouldReport("z", testNow, 0) {
+		if !claimed(s, "z", testNow, 0) {
 			t.Fatal("every == 0 should always report")
 		}
 	}
@@ -225,30 +244,63 @@ func TestSeenAlerts(t *testing.T) {
 		t.Error("entry older than 2*every was not dropped")
 	}
 	s.Forget("other")
-	if !s.ShouldReport("other", testNow.Add(12*time.Hour+2*time.Second), every) {
+	if !claimed(s, "other", testNow.Add(12*time.Hour+2*time.Second), every) {
 		t.Error("forgotten key should report again")
 	}
 }
 
-func TestSeenAlertsConcurrentClaim(t *testing.T) {
+func TestSeenAlertsNoticeOnly(t *testing.T) {
 	s := NewSeenAlerts()
-	var wg sync.WaitGroup
-	var mu sync.Mutex
-	wins := 0
-	for i := 0; i < 50; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			if s.ShouldReport("k", testNow, time.Hour) {
-				mu.Lock()
-				wins++
-				mu.Unlock()
-			}
-		}()
+	every := 6 * time.Hour
+	s.ShouldReport("k", testNow, every)
+	s.MarkNotice("k")
+	ok, retry := s.ShouldReport("k", testNow.Add(time.Hour), every)
+	if !ok || !retry {
+		t.Fatalf("after a notice the host should be asked again as a retry: ok=%v retry=%v", ok, retry)
 	}
-	wg.Wait()
-	if wins != 1 {
-		t.Errorf("%d goroutines claimed the same alert, want 1", wins)
+	if claimed(s, "k", testNow.Add(time.Hour), every) {
+		t.Fatal("a retry in flight must not be claimed twice")
+	}
+	s.Release("k")
+	if ok, retry := s.ShouldReport("k", testNow.Add(2*time.Hour), every); !ok || !retry {
+		t.Fatalf("released retry should be claimable as a retry again: ok=%v retry=%v", ok, retry)
+	}
+	s.MarkReported("k", testNow.Add(2*time.Hour))
+	if claimed(s, "k", testNow.Add(7*time.Hour), every) {
+		t.Fatal("a report after a notice starts the normal window from the report")
+	}
+	if ok, retry := s.ShouldReport("k", testNow.Add(8*time.Hour), every); !ok || retry {
+		t.Fatalf("after the window a fresh claim is due: ok=%v retry=%v", ok, retry)
+	}
+}
+
+func TestSeenAlertsConcurrentClaim(t *testing.T) {
+	race := func(s *SeenAlerts) int {
+		var wg sync.WaitGroup
+		var mu sync.Mutex
+		wins := 0
+		for i := 0; i < 50; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				if claimed(s, "k", testNow.Add(time.Minute), time.Hour) {
+					mu.Lock()
+					wins++
+					mu.Unlock()
+				}
+			}()
+		}
+		wg.Wait()
+		return wins
+	}
+	if wins := race(NewSeenAlerts()); wins != 1 {
+		t.Errorf("%d goroutines claimed the same new alert, want 1", wins)
+	}
+	s := NewSeenAlerts()
+	s.ShouldReport("k", testNow, time.Hour)
+	s.MarkNotice("k")
+	if wins := race(s); wins != 1 {
+		t.Errorf("%d goroutines claimed the same notice-only alert, want 1", wins)
 	}
 }
 
@@ -336,6 +388,99 @@ func TestProcessAlertUnreachableNoticeOff(t *testing.T) {
 	}
 }
 
+// switchHost answers 500 while down is true, else with a one-command report.
+func switchHost(t *testing.T, down *atomic.Bool) *fakeHost {
+	return newFakeHost(t, func(w http.ResponseWriter, r *http.Request) {
+		if down.Load() {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		replyJSON(`{"commands":[{"title":"df","command":"df -h","output":"/ 91%"}]}`)(w, r)
+	})
+}
+
+func TestProcessAlertNoticeThenRecovery(t *testing.T) {
+	captureLog(t)
+	slack := newFakeSlack(t, http.StatusOK)
+	var down atomic.Bool
+	down.Store(true)
+	host := switchHost(t, &down)
+	r := newTestReporter(t, slack.srv.URL, host.srv.URL, "")
+	now := testNow
+	r.Now = func() time.Time { return now }
+
+	r.ProcessAlert(context.Background(), testAlert("web1:9100"))
+	down.Store(false)
+	now = testNow.Add(time.Hour)
+	r.ProcessAlert(context.Background(), testAlert("web1:9100"))
+	now = testNow.Add(2 * time.Hour)
+	r.ProcessAlert(context.Background(), testAlert("web1:9100")) // reported now: quiet
+
+	msgs := slack.messages(t)
+	if len(msgs) != 2 {
+		t.Fatalf("Slack got %d messages, want 1 notice + 1 report", len(msgs))
+	}
+	if !strings.Contains(messageText(msgs[0]), "No report could be collected from web1: host replied 500") {
+		t.Errorf("first message = %q, want the notice", messageText(msgs[0]))
+	}
+	if !strings.Contains(messageText(msgs[1]), "/ 91%") {
+		t.Errorf("second message = %q, want the report", messageText(msgs[1]))
+	}
+	if n := len(host.Calls()); n != 2 {
+		t.Errorf("host got %d calls, want 2", n)
+	}
+}
+
+func TestProcessAlertNoticeOnceWhileUnreachable(t *testing.T) {
+	captureLog(t)
+	slack := newFakeSlack(t, http.StatusOK)
+	var down atomic.Bool
+	down.Store(true)
+	host := switchHost(t, &down)
+	r := newTestReporter(t, slack.srv.URL, host.srv.URL, "")
+	now := testNow
+	r.Now = func() time.Time { return now }
+
+	r.ProcessAlert(context.Background(), testAlert("web1:9100"))
+	now = testNow.Add(time.Hour)
+	r.ProcessAlert(context.Background(), testAlert("web1:9100"))
+	if n := len(slack.raw()); n != 1 {
+		t.Errorf("Slack got %d messages inside the window, want exactly 1 notice", n)
+	}
+	if n := len(host.Calls()); n != 2 {
+		t.Errorf("host got %d calls, want 2", n)
+	}
+	// After repeat_hours the cycle starts over: a new notice may be posted.
+	now = testNow.Add(6 * time.Hour)
+	r.ProcessAlert(context.Background(), testAlert("web1:9100"))
+	if n := len(slack.raw()); n != 2 {
+		t.Errorf("Slack got %d messages after the window, want 2", n)
+	}
+}
+
+func TestProcessAlertConcurrentRetryPostsOnce(t *testing.T) {
+	captureLog(t)
+	slack := newFakeSlack(t, http.StatusOK)
+	var down atomic.Bool
+	down.Store(true)
+	host := switchHost(t, &down)
+	r := newTestReporter(t, slack.srv.URL, host.srv.URL, "")
+	r.ProcessAlert(context.Background(), testAlert("web1:9100")) // notice
+	down.Store(false)
+	var wg sync.WaitGroup
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			r.ProcessAlert(context.Background(), testAlert("web1:9100"))
+		}()
+	}
+	wg.Wait()
+	if n := len(slack.raw()); n != 2 {
+		t.Errorf("Slack got %d messages, want 1 notice + 1 report", n)
+	}
+}
+
 func TestProcessAlertHostTimeout(t *testing.T) {
 	captureLog(t)
 	slack := newFakeSlack(t, http.StatusOK)
@@ -375,6 +520,8 @@ func TestProcessAlertHostRefuses(t *testing.T) {
 		{"cut-off json", replyJSON(`{"commands":[{"title":"df","outp`), "unreadable reply"},
 		{"json null", replyJSON(`null`), "unreadable reply"},
 		{"json array", replyJSON(`[]`), "unreadable reply"},
+		{"over 1 MiB", replyJSON(`{"commands":[{"title":"t","command":"c","output":"` +
+			strings.Repeat("x", maxHostReply) + `"}]}`), "reply too large"},
 		{"redirect", func(w http.ResponseWriter, r *http.Request) {
 			http.Redirect(w, r, "/elsewhere", http.StatusFound)
 		}, "host replied 302"},
@@ -416,6 +563,37 @@ func TestProcessAlertSkipsNonHost(t *testing.T) {
 	}
 	if n := strings.Count(logs.String(), "\n"); n != 2 {
 		t.Errorf("want one log line per skipped alert, got %d: %q", n, logs.String())
+	}
+}
+
+func TestProcessAlertReportHosts(t *testing.T) {
+	logs := captureLog(t)
+	slack := newFakeSlack(t, http.StatusOK)
+	host := newFakeHost(t, replyJSON(`{"commands":[]}`))
+	r := newTestReporter(t, slack.srv.URL, host.srv.URL,
+		`,"report_hosts":["web1.clearc2.com",".prod.clearc2.com","192.168.100.0/24"],"hosts":{"friendly":"10.9.9.9"}`)
+	for _, instance := range []string{"WEB1.clearc2.com:9100", "db1.prod.clearc2.com:9100", "192.168.100.7:9100", "friendly"} {
+		r.ProcessAlert(context.Background(), testAlert(instance))
+	}
+	if n := len(host.Calls()); n != 4 {
+		t.Fatalf("allowed hosts: host got %d calls, want 4", n)
+	}
+	before := logs.String()
+	for _, instance := range []string{"site.example.com:443", "prod.clearc2.com:9100", "192.168.101.7:9100"} {
+		r.ProcessAlert(context.Background(), testAlert(instance))
+	}
+	if n := len(host.Calls()); n != 4 {
+		t.Errorf("host got %d calls after the skipped alerts, want still 4", n)
+	}
+	if n := len(slack.raw()); n != 4 {
+		t.Errorf("Slack got %d messages, want 4 (none for skipped hosts)", n)
+	}
+	skipped := strings.TrimPrefix(logs.String(), before)
+	if n := strings.Count(skipped, "\n"); n != 3 {
+		t.Errorf("want one log line per skipped alert, got %d: %q", n, skipped)
+	}
+	if !strings.Contains(skipped, `"site.example.com"`) || !strings.Contains(skipped, `"Disk Space"`) {
+		t.Errorf("skip line should name the host (quoted) and the alert: %q", skipped)
 	}
 }
 
@@ -537,7 +715,7 @@ func TestWebhookHandlerOneReportPerAlert(t *testing.T) {
 	captureLog(t)
 	slack := newFakeSlack(t, http.StatusOK)
 	host := newFakeHost(t, func(w http.ResponseWriter, r *http.Request) {
-		replyJSON(`{"commands":[{"title":"name","command":"hostname","output":"` + r.URL.Query().Get("host") + `"}]}`)(w, r)
+		replyJSON(`{"commands":[{"title":"name","command":"hostname","output":"`+r.URL.Query().Get("host")+`"}]}`)(w, r)
 	})
 	r := newTestReporter(t, slack.srv.URL, host.srv.URL, "")
 	var alerts []Alert
