@@ -7,7 +7,6 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"os"
 	"os/exec"
 	"strings"
 	"sync"
@@ -31,12 +30,6 @@ type WebhookPayload struct {
 	ExternalURL string  `json:"externalURL"`
 }
 
-type CommandSection struct {
-	Title   string `json:"title"`
-	Command string `json:"command"`
-	Output  string `json:"output"`
-}
-
 type CommandSectionsJSON struct {
 	Commands []*CommandSection `json:"commands"`
 }
@@ -55,28 +48,8 @@ type SlackBlocks struct {
 	Blocks []SlackBlock `json:"blocks"`
 }
 
-type Config struct {
-	Slack  string                       `json:"slack"`
-	Token  string                       `json:"token"`
-	Alerts map[string][]*CommandSection `json:"alerts"`
-	Hosts  map[string]string            `json:"hosts"`
-}
-
 type ErrorPayload struct {
 	Error string `json:"error"`
-}
-
-func getConfig() (*Config, error) {
-	file, fileErr := os.ReadFile(os.Args[1])
-	if fileErr != nil {
-		return nil, fileErr
-	}
-	var config Config
-	err := json.Unmarshal(file, &config)
-	if err != nil {
-		return nil, err
-	}
-	return &config, nil
 }
 
 func getAlertHost(alert Alert) string {
